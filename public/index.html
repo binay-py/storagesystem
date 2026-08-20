@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>sanduk</title>
+<meta name="theme-color" content="#120f0d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<!-- lock screen -->
+<section id="screen-lock" class="screen center" hidden>
+  <div class="card">
+    <h1 class="wordmark">sanduk</h1>
+    <p class="tagline">your locked chest in the cloud. photos and videos are encrypted on this device before they leave it. nobody else can open them, not even the server.</p>
+    <button id="btn-new-vault" class="btn btn-brass btn-big">create a new chest</button>
+    <div class="divider"><span>already have a key?</span></div>
+    <input id="key-input" class="key-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your key" />
+    <div id="invite-row" hidden>
+      <input id="invite-input" class="key-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="invite code" />
+    </div>
+    <label class="check"><input type="checkbox" id="remember" checked /><span>stay unlocked on this device</span></label>
+    <button id="btn-unlock" class="btn btn-big">unlock</button>
+    <p id="lock-error" class="error" hidden></p>
+  </div>
+</section>
+
+<!-- new key reveal -->
+<section id="screen-reveal" class="screen center" hidden>
+  <div class="card">
+    <h2 class="card-title">this is your key</h2>
+    <p class="tagline">the only way into your chest. no email, no reset, no recovery. lose it and everything inside is gone forever. save it in two places now.</p>
+    <div id="key-plate" class="key-plate" role="button" tabindex="0" title="tap to copy"></div>
+    <button id="btn-copy-key" class="btn btn-big">copy key</button>
+    <div id="invite-row-reveal" hidden>
+      <input id="invite-input-reveal" class="key-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="invite code" />
+    </div>
+    <label class="check confirm"><input type="checkbox" id="confirm-saved" /><span>i saved it somewhere outside this device</span></label>
+    <button id="btn-enter" class="btn btn-brass btn-big" disabled>open my chest</button>
+    <p id="reveal-error" class="error" hidden></p>
+  </div>
+</section>
+
+<!-- main app -->
+<section id="screen-app" class="screen" hidden>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="wordmark small">sanduk</span>
+      <span id="stats-chip" class="stats-chip" hidden></span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-backup" class="btn btn-ghost" title="back up many photos at once, duplicates are skipped">backup</button>
+      <button id="btn-upload" class="btn btn-brass hide-mobile">upload</button>
+      <button id="btn-lock" class="btn btn-ghost" title="lock and clear this device">lock</button>
+    </div>
+  </header>
+
+  <input id="file-input" type="file" multiple hidden />
+
+  <div id="upload-status" class="upload-status" hidden>
+    <div class="upload-row">
+      <span id="upload-label">uploading...</span>
+      <span id="upload-pct">0%</span>
+    </div>
+    <div class="bar"><div id="upload-bar" class="bar-fill"></div></div>
+  </div>
+
+  <!-- search / sort / select tools (photos + videos tabs) -->
+  <div id="list-tools" class="list-tools" hidden>
+    <input id="search-input" class="tool-search" type="search" placeholder="search names..." autocomplete="off" />
+    <select id="sort-select" class="tool-sort" title="sort">
+      <option value="new">newest</option>
+      <option value="old">oldest</option>
+      <option value="big">largest</option>
+    </select>
+    <button id="btn-select-mode" class="btn btn-ghost btn-sm">select</button>
+  </div>
+
+  <!-- album subheader -->
+  <div id="album-head" class="album-head" hidden>
+    <button id="btn-album-back" class="icon-btn" aria-label="back">&#x2039;</button>
+    <span id="album-title" class="album-title"></span>
+    <div class="album-head-actions">
+      <button id="btn-album-add" class="btn btn-ghost btn-sm">add</button>
+      <button id="btn-album-delete" class="icon-btn danger" title="delete album">&#x1F5D1;</button>
+    </div>
+  </div>
+
+  <!-- selection bar -->
+  <div id="select-bar" class="select-bar" hidden>
+    <span id="select-count">0 selected</span>
+    <div class="select-actions">
+      <button id="btn-sel-fav" class="icon-btn" title="favorite">&#x2605;</button>
+      <button id="btn-sel-album" class="icon-btn" title="add to album">&#x25A3;</button>
+      <button id="btn-sel-restore" class="btn btn-ghost btn-sm" hidden>restore</button>
+      <button id="btn-sel-trash" class="icon-btn danger" title="move to trash">&#x1F5D1;</button>
+      <button id="btn-sel-done" class="btn btn-brass btn-sm" hidden>add</button>
+      <button id="btn-sel-cancel" class="btn btn-ghost btn-sm">cancel</button>
+    </div>
+  </div>
+
+  <main id="gallery" class="gallery-wrap"></main>
+
+  <div id="empty" class="empty" hidden>
+    <div class="empty-mark"></div>
+    <p id="empty-title" class="empty-title">the chest is empty</p>
+    <p id="empty-sub" class="muted">upload a photo or video. it gets encrypted right here, then locked away in the cloud. only your key can open it again.</p>
+    <button id="btn-empty-upload" class="btn btn-brass btn-big">upload something</button>
+  </div>
+
+  <button id="fab" class="fab hide-desktop" title="upload" aria-label="upload">+</button>
+
+  <nav class="tabbar">
+    <button class="tab active" data-tab="photos"><span class="tab-ic">&#x25A6;</span>photos</button>
+    <button class="tab" data-tab="videos"><span class="tab-ic">&#x25B6;</span>videos</button>
+    <button class="tab" data-tab="albums"><span class="tab-ic">&#x25A3;</span>albums</button>
+    <button class="tab" data-tab="favorites"><span class="tab-ic">&#x2605;</span>favs</button>
+    <button class="tab" data-tab="trash"><span class="tab-ic">&#x1F5D1;</span>trash</button>
+  </nav>
+
+  <div id="dropzone" class="dropzone" hidden><span>drop to encrypt and upload</span></div>
+</section>
+
+<!-- viewer -->
+<div id="viewer" class="viewer" hidden>
+  <div class="viewer-top">
+    <button id="btn-close" class="icon-btn" aria-label="close">&#x2715;</button>
+    <div class="viewer-meta">
+      <span id="viewer-name" class="viewer-name"></span>
+      <span id="viewer-sub" class="viewer-sub"></span>
+    </div>
+    <div class="viewer-actions">
+      <button id="btn-slideshow" class="icon-btn" title="slideshow">&#x25B8;&#x25B8;</button>
+      <button id="btn-fav" class="icon-btn" aria-label="favorite" title="favorite">&#x2606;</button>
+      <button id="btn-download" class="icon-btn" aria-label="download" title="download">&#x2193;</button>
+      <button id="btn-restore" class="btn btn-ghost btn-sm" hidden>restore</button>
+      <button id="btn-trash" class="icon-btn danger" aria-label="move to trash" title="move to trash">&#x1F5D1;</button>
+    </div>
+  </div>
+
+  <div id="viewer-body" class="viewer-body"></div>
+  <div id="live-hint" class="live-hint" hidden>hold the photo to play live</div>
+
+  <button id="btn-prev" class="nav-btn prev hide-mobile" aria-label="previous">&#x2039;</button>
+  <button id="btn-next" class="nav-btn next hide-mobile" aria-label="next">&#x203A;</button>
+</div>
+
+<!-- new album dialog -->
+<div id="album-dialog" class="dialog-wrap" hidden>
+  <div class="dialog">
+    <p class="dialog-title">new album</p>
+    <input id="album-name-input" class="key-input" type="text" placeholder="album name" maxlength="60" />
+    <div class="dialog-actions">
+      <button id="btn-album-cancel" class="btn btn-ghost">cancel</button>
+      <button id="btn-album-create" class="btn btn-brass">create</button>
+    </div>
+  </div>
+</div>
+
+<!-- choose album dialog (bulk add) -->
+<div id="chooser-dialog" class="dialog-wrap" hidden>
+  <div class="dialog">
+    <p class="dialog-title">add to album</p>
+    <div id="chooser-list" class="chooser-list"></div>
+    <div class="dialog-actions">
+      <button id="btn-chooser-cancel" class="btn btn-ghost">cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

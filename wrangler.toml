@@ -1,0 +1,15 @@
+name = "sanduk"
+main = "src/worker.js"
+compatibility_date = "2026-08-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sanduk"
+database_id = "2cf79594-869a-48c9-a4f0-fc64e13da1f4"
+
+[vars]
+TG_CHAT_ID = "-1004308966558"
