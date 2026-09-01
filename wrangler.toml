@@ -9,7 +9,7 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "sanduk"
-database_id = "2cf79594-869a-48c9-a4f0-fc64e13da1f4"
+database_id = "PASTE_YOUR_D1_ID_HERE"
 
 [vars]
-TG_CHAT_ID = "-1004308966558"
+TG_CHAT_ID = "SETUP"   # replace with your channel id, see /setup.html

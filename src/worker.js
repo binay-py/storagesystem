@@ -6,6 +6,25 @@
 
 const CHUNK_LIMIT = 20 * 1024 * 1024; // telegram getFile caps downloads at 20MB
 const TRASH_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
+const PAGE_SIZE = 500; // rows per page of the timeline
+
+// cursor = "<timestamp>_<row id>". the id breaks ties when two files share a
+// timestamp, which is common for a burst of camera-roll uploads.
+function parseCursor(raw) {
+  if (!raw) return null;
+  const i = raw.indexOf('_');
+  if (i < 1) return null;
+  const ts = Number(raw.slice(0, i));
+  const id = raw.slice(i + 1);
+  if (!Number.isFinite(ts) || !id) return null;
+  return { ts, id };
+}
+
+function makeCursor(rows, limit, tsField) {
+  if (rows.length < limit) return null; // short page means we hit the end
+  const last = rows[rows.length - 1];
+  return `${last[tsField]}_${last.id}`;
+}
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -73,6 +92,15 @@ export default {
     if (!url.pathname.startsWith('/api/')) {
       return env.ASSETS.fetch(request);
     }
+    // setup routes run before auth: they exist to help a fresh install find its
+    // channel id, and they turn themselves off the moment TG_CHAT_ID is real.
+    if (url.pathname.startsWith('/api/setup/')) {
+      try {
+        return await setupRoute(request, env, url);
+      } catch (e) {
+        return err(e.message || 'setup error', 500);
+      }
+    }
     const userId = await auth(request);
     if (!userId) return err('missing or bad auth token', 401);
     try {
@@ -85,6 +113,61 @@ export default {
 
 const FILE_COLS = `id, name_enc, name_iv, mime, size, chunk_count, has_thumb, thumb_iv,
   is_favorite, deleted_at, live_video_id, is_live_hidden, created_at`;
+
+// ---- setup ----
+// only alive while TG_CHAT_ID is unset or still the "SETUP" placeholder.
+// once you put a real channel id in wrangler.toml and redeploy, these are gone.
+
+const setupOpen = (env) => !env.TG_CHAT_ID || env.TG_CHAT_ID === 'SETUP';
+
+async function setupRoute(request, env, url) {
+  const path = url.pathname.replace(/^\/api\/setup/, '');
+
+  if (!setupOpen(env))
+    return err('setup is closed: TG_CHAT_ID is already configured', 410);
+
+  // GET /api/setup/status -> what is still missing
+  if (request.method === 'GET' && path === '/status') {
+    let botName = null;
+    if (env.TG_BOT_TOKEN) {
+      const me = await fetch(
+        `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/getMe`
+      ).then((r) => r.json()).catch(() => null);
+      if (me && me.ok) botName = me.result.username;
+    }
+    return json({
+      open: true,
+      hasToken: Boolean(env.TG_BOT_TOKEN),
+      hasDb: Boolean(env.DB),
+      botName,
+    });
+  }
+
+  // GET /api/setup/chat-id -> channels the bot has seen a message in
+  if (request.method === 'GET' && path === '/chat-id') {
+    if (!env.TG_BOT_TOKEN)
+      return err('no bot token yet: run wrangler secret put TG_BOT_TOKEN', 400);
+    const data = await fetch(
+      `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/getUpdates?limit=100&allowed_updates=["channel_post","message"]`
+    ).then((r) => r.json());
+    if (!data.ok) return err(`telegram said: ${data.description}`, 502);
+
+    const seen = new Map();
+    for (const u of data.result) {
+      const chat = (u.channel_post || u.message || {}).chat;
+      if (!chat) continue;
+      if (chat.type === 'private') continue; // your own dm with the bot, not a store
+      seen.set(String(chat.id), {
+        id: String(chat.id),
+        title: chat.title || '(no title)',
+        type: chat.type,
+      });
+    }
+    return json({ chats: [...seen.values()] });
+  }
+
+  return err('not found', 404);
+}
 
 async function route(request, env, url, userId) {
   const path = url.pathname.replace(/^\/api/, '');
@@ -108,35 +191,55 @@ async function route(request, env, url, userId) {
     return json({ ok: true });
   }
 
-  // GET /files?view=active|trash
+  // GET /files?view=active|trash&limit=500&cursor=<ts>_<id>
+  //
+  // keyset pagination, newest first. the cursor is the sort timestamp plus the
+  // row id, so rows sharing a timestamp are never skipped or repeated.
+  // nextCursor is null on the last page.
   if (method === 'GET' && path === '/files') {
     const view = url.searchParams.get('view') || 'active';
-    if (view === 'trash') {
-      // lazy purge of expired trash
-      const { results: expired } = await env.DB.prepare(
-        `SELECT id FROM files WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at < ?`
-      )
-        .bind(userId, now - TRASH_TTL)
-        .all();
-      for (const f of expired) await destroyFile(env, f.id, userId);
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || PAGE_SIZE, 1), 1000);
+    const cursor = parseCursor(url.searchParams.get('cursor'));
 
+    if (view === 'trash') {
+      // lazy purge of expired trash, first page only
+      if (!cursor) {
+        const { results: expired } = await env.DB.prepare(
+          `SELECT id FROM files WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at < ?`
+        )
+          .bind(userId, now - TRASH_TTL)
+          .all();
+        for (const f of expired) await destroyFile(env, f.id, userId);
+      }
+
+      const where = cursor
+        ? `AND (deleted_at < ? OR (deleted_at = ? AND id < ?))`
+        : '';
+      const binds = cursor
+        ? [userId, cursor.ts, cursor.ts, cursor.id, limit]
+        : [userId, limit];
       const { results } = await env.DB.prepare(
         `SELECT ${FILE_COLS} FROM files
-         WHERE user_id = ? AND status = 'ready' AND deleted_at IS NOT NULL
-         ORDER BY deleted_at DESC LIMIT 500`
+         WHERE user_id = ? AND status = 'ready' AND deleted_at IS NOT NULL ${where}
+         ORDER BY deleted_at DESC, id DESC LIMIT ?`
       )
-        .bind(userId)
+        .bind(...binds)
         .all();
-      return json({ files: results });
+      return json({ files: results, nextCursor: makeCursor(results, limit, 'deleted_at') });
     }
+
+    const where = cursor ? `AND (created_at < ? OR (created_at = ? AND id < ?))` : '';
+    const binds = cursor
+      ? [userId, cursor.ts, cursor.ts, cursor.id, limit]
+      : [userId, limit];
     const { results } = await env.DB.prepare(
       `SELECT ${FILE_COLS} FROM files
-       WHERE user_id = ? AND status = 'ready' AND deleted_at IS NULL AND is_live_hidden = 0
-       ORDER BY created_at DESC LIMIT 1000`
+       WHERE user_id = ? AND status = 'ready' AND deleted_at IS NULL AND is_live_hidden = 0 ${where}
+       ORDER BY created_at DESC, id DESC LIMIT ?`
     )
-      .bind(userId)
+      .bind(...binds)
       .all();
-    return json({ files: results });
+    return json({ files: results, nextCursor: makeCursor(results, limit, 'created_at') });
   }
 
   // POST /files -> create record

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>sanduk setup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+<style>
+  /* same lacquer & brass material world as the app. this page is the
+     workbench, so it shows its fasteners: numbered plates, hairline rules. */
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #120f0d; --panel: #1b1613; --line: #2e251d;
+    --ink: #efe7d8; --muted: #978b7c;
+    --brass: #c9993a; --brass-hi: #e8bc5c; --verm: #c14b3d;
+    --ok: #7fa05a;
+  }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55; padding: 40px 20px 80px;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; }
+  h1 {
+    font-family: "Bricolage Grotesque", system-ui, sans-serif;
+    font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 6px;
+  }
+  .lede { color: var(--muted); margin: 0 0 36px; }
+  .step { display: grid; grid-template-columns: 34px 1fr; gap: 16px; margin-bottom: 30px; }
+  .num {
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(160deg, #3b2d16, #241b10);
+    border: 1px solid var(--line); color: var(--brass-hi);
+  }
+  h2 {
+    font-family: "Bricolage Grotesque", system-ui, sans-serif;
+    font-size: 17px; font-weight: 700; margin: 6px 0 8px;
+  }
+  p { margin: 0 0 10px; }
+  code, pre {
+    font-family: "JetBrains Mono", monospace; font-size: 13px;
+  }
+  code { background: var(--panel); padding: 2px 6px; border-radius: 5px; color: var(--brass-hi); }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; overflow-x: auto; margin: 10px 0; color: var(--ink);
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  .muted { color: var(--muted); font-size: 14px; }
+  button {
+    font-family: inherit; font-size: 15px; cursor: pointer;
+    background: linear-gradient(170deg, var(--brass-hi), var(--brass));
+    color: #1b1409; border: 0; border-radius: 11px; padding: 11px 18px; font-weight: 600;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.ghost { background: none; border: 1px solid var(--line); color: var(--ink); font-weight: 500; }
+  .found { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 12px; background: var(--panel); }
+  .found .title { font-weight: 600; }
+  .found .id { font-family: "JetBrains Mono", monospace; color: var(--brass-hi); font-size: 15px; margin: 4px 0 10px; }
+  .note { border-left: 2px solid var(--brass); padding-left: 14px; color: var(--muted); font-size: 14px; }
+  .bad { color: var(--verm); }
+  .good { color: var(--ok); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
+  a { color: var(--brass-hi); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>set up your chest</h1>
+  <p class="lede">four steps. the only fiddly one is finding your channel id, so this page does that part for you.</p>
+
+  <div id="status" class="note">checking this deployment...</div>
+  <hr />
+
+  <div class="step">
+    <div class="num">1</div>
+    <div>
+      <h2>make a bot</h2>
+      <p>message <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a> on telegram, send <code>/newbot</code>, and follow the prompts. it hands you a token that looks like <code>8123456:AAH...</code></p>
+      <p>give that token to your worker:</p>
+      <pre><code>wrangler secret put TG_BOT_TOKEN</code></pre>
+      <p class="muted">the token is a secret, not a var. it never goes in wrangler.toml and never touches git.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <div>
+      <h2>make a private channel and post once</h2>
+      <p>in telegram: new channel, set it to private, then add your bot as an admin with permission to post.</p>
+      <p>now send any message in that channel. a single "hi" is enough. the bot has to see one message before telegram will tell anyone the channel exists.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <div>
+      <h2>find the channel id</h2>
+      <p>press the button. this reads your bot's recent updates and lists every channel it can see.</p>
+      <button id="find">find my channel</button>
+      <div id="result"></div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">4</div>
+    <div>
+      <h2>save it and deploy</h2>
+      <p>put the id in <code>wrangler.toml</code>, replacing the <code>SETUP</code> placeholder:</p>
+      <pre><code>[vars]
+TG_CHAT_ID = "-1001234567890"</code></pre>
+      <p>then:</p>
+      <pre><code>wrangler deploy</code></pre>
+      <p class="muted">this page and its endpoints switch off automatically once TG_CHAT_ID holds a real id. nothing to remember to disable.</p>
+    </div>
+  </div>
+
+  <hr />
+  <p class="note">keep the bot token and your chest key in two places you control. if the channel is deleted or the bot is removed from it, the files are gone, and nobody can recover them for you. that is the trade you accepted when you chose a chest only you can open.</p>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function checkStatus() {
+  try {
+    const res = await fetch('/api/setup/status');
+    if (res.status === 410) {
+      $('status').innerHTML =
+        '<span class="good">setup is already done.</span> TG_CHAT_ID is configured, so these endpoints are switched off. ' +
+        '<a href="/">open your chest</a>';
+      $('find').disabled = true;
+      return;
+    }
+    const d = await res.json();
+    const bits = [];
+    bits.push(d.hasToken
+      ? `bot token: <span class="good">set${d.botName ? ' (@' + d.botName + ')' : ''}</span>`
+      : 'bot token: <span class="bad">missing, do step 1</span>');
+    bits.push(d.hasDb ? 'database: <span class="good">connected</span>' : 'database: <span class="bad">not bound</span>');
+    $('status').innerHTML = bits.join(' &middot; ');
+  } catch {
+    $('status').textContent = 'could not reach this worker. is it deployed?';
+  }
+}
+
+$('find').addEventListener('click', async () => {
+  const btn = $('find');
+  const out = $('result');
+  btn.disabled = true;
+  btn.textContent = 'looking...';
+  out.innerHTML = '';
+  try {
+    const res = await fetch('/api/setup/chat-id');
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'request failed');
+    if (!d.chats.length) {
+      out.innerHTML =
+        '<div class="found">no channels found yet. post a message in the channel, ' +
+        'confirm the bot is an admin there, then press the button again.</div>';
+    } else {
+      out.innerHTML = d.chats.map((c) => `
+        <div class="found">
+          <div class="title">${escapeHtml(c.title)}</div>
+          <div class="id" data-id="${escapeHtml(c.id)}">${escapeHtml(c.id)}</div>
+          <button class="ghost copy" data-id="${escapeHtml(c.id)}">copy id</button>
+        </div>`).join('');
+      out.querySelectorAll('.copy').forEach((b) =>
+        b.addEventListener('click', async () => {
+          await navigator.clipboard.writeText(b.dataset.id);
+          b.textContent = 'copied';
+          setTimeout(() => (b.textContent = 'copy id'), 1600);
+        })
+      );
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="found bad">${escapeHtml(e.message)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'find my channel';
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+checkStatus();
+</script>
+</body>
+</html>

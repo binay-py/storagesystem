@@ -26,7 +26,9 @@ const state = {
   selected: new Set(),
   sort: 'new',              // new | old | big
   query: '',
+  loadingMore: false,       // true while later pages are still coming in
 };
+let refreshToken = 0;
 let encKey = null;
 let authToken = null;
 let viewerList = [];
@@ -188,17 +190,41 @@ function lockApp() {
 }
 
 // ---- data ----
+// pull every page of a list. names are encrypted, so search and sort have to
+// happen on the client, which means we need the whole set of metadata. we render
+// the first page immediately and keep filling in behind it.
+async function loadAllPages(view, onPage) {
+  const out = [];
+  let cursor = null;
+  let guard = 0;
+  do {
+    const qs = new URLSearchParams({ view });
+    if (cursor) qs.set('cursor', cursor);
+    const res = await api('GET', `/files?${qs}`);
+    out.push(...res.files);
+    cursor = res.nextCursor || null;
+    if (onPage) onPage(out, Boolean(cursor));
+  } while (cursor && ++guard < 200);
+  return out;
+}
+
 async function refresh() {
-  const [{ files }, { albums }] = await Promise.all([
-    api('GET', '/files'),
+  const loadToken = ++refreshToken;
+  const [firstFiles, { albums }] = await Promise.all([
+    loadAllPages('active', (sofar, more) => {
+      if (loadToken !== refreshToken) return;
+      state.files = sofar;
+      state.loadingMore = more;
+      updateStats();
+      render();
+    }),
     api('GET', '/albums'),
   ]);
-  state.files = files;
+  if (loadToken !== refreshToken) return;
+  state.files = firstFiles;
+  state.loadingMore = false;
   state.albums = albums;
-  if (state.tab === 'trash') {
-    const t = await api('GET', '/files?view=trash');
-    state.trash = t.files;
-  }
+  if (state.tab === 'trash') state.trash = await loadAllPages('trash');
   updateStats();
   render();
 }
@@ -207,7 +233,9 @@ function updateStats() {
   const n = state.files.length;
   if (!n) { chip.hidden = true; return; }
   const bytes = state.files.reduce((a, f) => a + f.size, 0);
-  chip.textContent = `${n} \u00b7 ${fmtSize(bytes)}`;
+  chip.textContent = state.loadingMore
+    ? `${n}+ \u00b7 loading...`
+    : `${n} \u00b7 ${fmtSize(bytes)}`;
   chip.hidden = false;
 }
 
@@ -235,8 +263,11 @@ function setTab(tab) {
     b.classList.toggle('active', b.dataset.tab === tab)
   );
   if (tab === 'trash') {
-    api('GET', '/files?view=trash').then((r) => {
-      state.trash = r.files;
+    loadAllPages('trash', (sofar) => {
+      state.trash = sofar;
+      render();
+    }).then((all) => {
+      state.trash = all;
       render();
     });
   }
