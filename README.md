@@ -9,6 +9,10 @@ everything (files, filenames, album names, thumbnails) is AES-GCM-256 encrypted
 in your browser before upload. the server and telegram only ever see ciphertext.
 there are no accounts: a random secret key is your identity.
 
+<p align="center">
+  <img src="docs/sanduk-flow.gif" alt="A photo is encrypted in the browser, split into chunks, routed by a Cloudflare Worker into a private Telegram channel. The key never leaves the browser." width="100%">
+</p>
+
 > the repo is named `storagesystem`; the project is `sanduk`. cloning gives you a
 > folder called `storagesystem` — the commands below account for that.
 
