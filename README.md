@@ -9,6 +9,9 @@ everything (files, filenames, album names, thumbnails) is AES-GCM-256 encrypted
 in your browser before upload. the server and telegram only ever see ciphertext.
 there are no accounts: a random secret key is your identity.
 
+> the repo is named `storagesystem`; the project is `sanduk`. cloning gives you a
+> folder called `storagesystem` — the commands below account for that.
+
 ---
 
 ## what you need
@@ -26,28 +29,37 @@ no credit card. no R2. no object storage bill.
 **1. get the code and the cli**
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/sanduk.git
-cd sanduk
+git clone https://github.com/binay-py/storagesystem.git
+cd storagesystem
 npm install -g wrangler
 wrangler login
 ```
 
-**2. create the database**
+**2. make your own wrangler.toml**
+
+```bash
+cp wrangler.toml.example wrangler.toml
+```
+
+`wrangler.toml` is yours and stays local. the example file is only a shape to
+copy — every id in it gets replaced in the next steps.
+
+**3. create the database**
 
 ```bash
 wrangler d1 create sanduk
 ```
 
-it prints a `database_id`. paste it into `wrangler.toml`, replacing
-`PASTE_YOUR_D1_ID_HERE`.
+it prints a `database_id`. paste it into `wrangler.toml`, replacing the
+`database_id` value that came from the example.
 
-**3. create the tables**
+**4. create the tables**
 
 ```bash
 wrangler d1 execute sanduk --remote --file=./schema.sql
 ```
 
-**4. make a telegram bot**
+**5. make a telegram bot**
 
 message [@BotFather](https://t.me/botfather), send `/newbot`, follow the prompts.
 he gives you a token. hand it to the worker:
@@ -56,12 +68,20 @@ he gives you a token. hand it to the worker:
 wrangler secret put TG_BOT_TOKEN
 ```
 
-**5. make a private channel**
+**6. make a private channel**
 
 in telegram: new channel, set it private, add your bot as an admin with permission
 to post. then send any message in the channel, so the bot has seen something.
 
-**6. deploy, then find your channel id**
+**7. deploy, then find your channel id**
+
+set `TG_CHAT_ID` to `"SETUP"` in `wrangler.toml` first — that's the flag that keeps
+the setup endpoints alive:
+
+```toml
+[vars]
+TG_CHAT_ID = "SETUP"
+```
 
 ```bash
 wrangler deploy
@@ -76,7 +96,7 @@ it lists every channel your bot can see, with the id ready to copy. put that id 
 TG_CHAT_ID = "-1001234567890"
 ```
 
-**7. deploy again**
+**8. deploy again**
 
 ```bash
 wrangler deploy
@@ -84,7 +104,7 @@ wrangler deploy
 
 that's it. open the worker url, press **create a new chest**, and save the key it
 gives you somewhere safe. the setup endpoints switch themselves off the moment
-`TG_CHAT_ID` holds a real id.
+`TG_CHAT_ID` holds a real id — anything other than unset or `"SETUP"` closes them.
 
 ## upgrading an existing install
 
@@ -144,6 +164,26 @@ your identity is one 32-byte secret. HKDF derives two things from it: an auth
 token (sent to the server, which stores only its sha-256) and an encryption key
 (never leaves the browser). so the server cannot decrypt your files even if it
 wanted to, and cannot recover your account if you lose the key.
+
+### the api
+
+every route is under `/api`, authenticated by the derived token. `/api/setup/*`
+is the exception: it needs no auth and only answers while `TG_CHAT_ID` is unset
+or `"SETUP"`.
+
+| route | what it does |
+|---|---|
+| `POST /hello` | upsert the user. gated by `SETUP_CODE` for new chests when that secret is set |
+| `GET /files` | timeline, keyset-paginated newest-first, 500 rows a page |
+| `POST /files` | register a file and its chunk map |
+| `POST /hashes` | dedupe check — which content hashes are already stored |
+| `POST /files/bulk` | bulk favorite / trash / restore / delete / add-to-album |
+| `GET/POST /albums` | list and create albums |
+| `GET /setup/status` | whether setup is still open |
+| `GET /setup/chat-id` | list channels the bot can see |
+
+pagination uses a `<timestamp>_<id>` cursor rather than an offset, so rows that
+share a timestamp are never skipped or repeated.
 
 ## limits
 
