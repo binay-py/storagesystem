@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an improvement for Sanduk
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem are you trying to solve?
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe your preferred approach.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches you considered?
+  - type: textarea
+    id: security
+    attributes:
+      label: Privacy/security impact
+      description: Could this affect encryption, key handling, setup exposure, or metadata visibility?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and roadmap docs.
+          required: true
+        - label: I described the user value, not just implementation details.
+          required: true
