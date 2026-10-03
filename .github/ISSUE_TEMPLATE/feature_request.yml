@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose an improvement to Sanduk
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+      placeholder: It's hard to verify setup route state after deployment.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe your preferred approach.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional
+  - type: textarea
+    id: impact
+    attributes:
+      label: Scope and impact
+      description: Behavior changes, migration impact, security/trust-boundary impact.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checks
+      options:
+        - label: I searched existing issues and discussions
+          required: true
+        - label: This request does not include secrets or private credentials
+          required: true

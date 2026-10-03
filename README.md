@@ -1,36 +1,29 @@
-# sanduk
+# Sanduk
 
-your locked chest in the cloud. a private photo and video library that runs on
-infrastructure you own, for roughly nothing a month.
+A zero-knowledge personal photo and video vault using browser encryption, Cloudflare Workers, and Telegram storage.
 
-telegram holds the bytes. cloudflare runs the app. your browser holds the only key.
-
-everything (files, filenames, album names, thumbnails) is AES-GCM-256 encrypted
-in your browser before upload. the server and telegram only ever see ciphertext.
-there are no accounts: a random secret key is your identity.
+- Browser encrypts files and metadata before upload (AES-GCM-256)
+- Cloudflare Worker routes ciphertext and stores encrypted metadata in D1
+- Telegram stores encrypted file chunks only
+- No password reset flow: your generated chest key is your identity and recovery key
 
 <p align="center">
   <img src="docs/sanduk-flow.gif" alt="A photo is encrypted in the browser, split into chunks, routed by a Cloudflare Worker into a private Telegram channel. The key never leaves the browser." width="100%">
 </p>
 
-> the repo is named `storagesystem`; the project is `sanduk`. cloning gives you a
-> folder called `storagesystem` — the commands below account for that.
+> Repository name is `storagesystem`; product name is **Sanduk**.
 
----
+## What you need
 
-## what you need
+| Requirement | Why |
+|---|---|
+| Telegram account | Create the bot and private channel |
+| Cloudflare account | Run Worker + D1 |
+| Node.js 18+ | Install and run Wrangler CLI |
 
-| thing | cost | notes |
-|---|---|---|
-| a telegram account | free | for the bot and the private channel |
-| a cloudflare account | free | workers + D1 both fit the free tier |
-| node.js 18+ | free | only to run wrangler |
+## Quick start
 
-no credit card. no R2. no object storage bill.
-
-## install
-
-**1. get the code and the cli**
+1. **Clone and install Wrangler**
 
 ```bash
 git clone https://github.com/binay-py/storagesystem.git
@@ -39,178 +32,119 @@ npm install -g wrangler
 wrangler login
 ```
 
-**2. make your own wrangler.toml**
+2. **Create local config**
 
 ```bash
 cp wrangler.toml.example wrangler.toml
 ```
 
-`wrangler.toml` is yours and stays local. the example file is only a shape to
-copy — every id in it gets replaced in the next steps.
-
-**3. create the database**
+3. **Create and initialize D1**
 
 ```bash
 wrangler d1 create sanduk
-```
-
-it prints a `database_id`. paste it into `wrangler.toml`, replacing the
-`database_id` value that came from the example.
-
-**4. create the tables**
-
-```bash
 wrangler d1 execute sanduk --remote --file=./schema.sql
 ```
 
-**5. make a telegram bot**
+Copy the returned `database_id` into your local `wrangler.toml`.
 
-message [@BotFather](https://t.me/botfather), send `/newbot`, follow the prompts.
-he gives you a token. hand it to the worker:
+4. **Set Telegram bot token**
 
 ```bash
 wrangler secret put TG_BOT_TOKEN
 ```
 
-**6. make a private channel**
+5. **Set setup mode, deploy, and discover channel ID**
 
-in telegram: new channel, set it private, add your bot as an admin with permission
-to post. then send any message in the channel, so the bot has seen something.
-
-**7. deploy, then find your channel id**
-
-set `TG_CHAT_ID` to `"SETUP"` in `wrangler.toml` first — that's the flag that keeps
-the setup endpoints alive:
+Set this in `wrangler.toml`:
 
 ```toml
 [vars]
 TG_CHAT_ID = "SETUP"
 ```
 
+Deploy:
+
 ```bash
 wrangler deploy
 ```
 
-open `https://your-worker.workers.dev/setup.html` and press **find my channel**.
-it lists every channel your bot can see, with the id ready to copy. put that id in
-`wrangler.toml`:
+Open `https://<your-worker>.workers.dev/setup.html` and use **Find My Channel**.
+
+6. **Set real chat ID and deploy again**
 
 ```toml
 [vars]
 TG_CHAT_ID = "-1001234567890"
 ```
 
-**8. deploy again**
-
 ```bash
 wrangler deploy
 ```
 
-that's it. open the worker url, press **create a new chest**, and save the key it
-gives you somewhere safe. the setup endpoints switch themselves off the moment
-`TG_CHAT_ID` holds a real id — anything other than unset or `"SETUP"` closes them.
+7. **Create your chest and back up your key**
 
-## upgrading an existing install
+Open your Worker URL, create a chest, and store the generated key in at least two secure places.
+
+## Setup and trust boundaries
+
+| Component | Can see plaintext file content? | Can see encrypted metadata blobs? | Holds your key? |
+|---|---|---|---|
+| Browser | Yes | Yes | Yes (local/session only) |
+| Cloudflare Worker + D1 | No | Yes | No |
+| Telegram channel | No | No (only encrypted chunks) | No |
+
+`/api/setup/*` endpoints are intentionally open only while `TG_CHAT_ID` is unset or set to `"SETUP"`. After you set a real channel ID and redeploy, setup endpoints return closed responses.
+
+## API highlights
+
+All normal routes are under `/api` and require auth derived from your chest key.
+
+| Route | Purpose |
+|---|---|
+| `POST /hello` | Create/update user (new users can be gated by `SETUP_CODE`) |
+| `GET /files` | Paginated timeline |
+| `POST /files` | Register file metadata |
+| `PUT /files/:id/chunks/:idx` | Upload encrypted chunk |
+| `POST /files/:id/complete` | Mark file ready after all chunks |
+| `GET /hashes` | Return existing content hashes for dedupe |
+| `POST /files/bulk` | Bulk favorite/trash/restore/delete/add-to-album |
+| `GET/POST /albums` | List/create albums |
+| `GET /setup/status` | Setup health while setup mode is open |
+| `GET /setup/chat-id` | List channels visible to bot while setup mode is open |
+
+## Limits and practical constraints
+
+- Chunk uploads are capped at 20 MB each (`/src/worker.js` enforces Telegram getFile compatibility).
+- Large backups are slower due to Telegram Bot API throughput limits.
+- Losing the chest key means losing access.
+- This project has no formal third-party security audit.
+
+## Upgrades
+
+If upgrading from older deployments, run migrations in order as needed:
 
 ```bash
 wrangler d1 execute sanduk --remote --file=./migration-v3.sql
+wrangler d1 execute sanduk --remote --file=./src/migration-v4.sql
 wrangler deploy
 ```
 
-migrations keep your data. run them in order if you skipped versions.
+## Troubleshooting
 
----
+- **`setup is closed`**: Set `TG_CHAT_ID = "SETUP"` and redeploy.
+- **No channels listed in setup**: Ensure bot is admin in your private channel and send a message in that channel first.
+- **Unauthorized API responses**: Verify you are using the exact saved chest key from creation.
+- **Upload stalls on large batches**: Retry later; Telegram API limits are burst-sensitive.
 
-## features
+## Documentation
 
-- photos timeline grouped by date, videos tab, favorites, albums, trash (30-day purge)
-- backup with dedupe: select your whole camera roll, already-stored files are skipped (sha-256 content hashing)
-- multi-select everywhere: long-press (or the select button) then bulk favorite / trash / restore / delete / add-to-album
-- search by filename, sort by newest / oldest / largest
-- live photos: upload the .heic/.jpg + .mov pair together, press-and-hold in the viewer plays the motion
-- slideshow mode in the viewer (space bar toggles on desktop)
-- parallel encrypted transfers: 3-way chunk downloads, 2-way uploads
-- android share target: share photos from any app straight into sanduk (after installing the pwa)
-- optional invite gate: set a `SETUP_CODE` secret and only people with the code can create chests
-- installable pwa, network-first service worker, ultrawide-aware layout
+- [Documentation index](docs/README.md)
+- [Launch kit](docs/launch-kit.md)
+- [Deployment verification and post-deploy checks](docs/deployment-verification.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
 
-## optional: lock down chest creation
+## License
 
-if your worker url might get shared around:
-
-```bash
-wrangler secret put SETUP_CODE     # any code you like
-```
-
-new chests then require the code. existing chests are unaffected. skip this
-entirely for personal use.
-
----
-
-## how it works
-
-```
-browser                 worker                  telegram
-  |                       |                        |
-  |-- encrypt chunk ----->|                        |
-  |   (AES-GCM, your key) |-- sendDocument ------->|  private channel
-  |                       |                        |
-  |                       |<-- file_id ------------|
-  |                       |
-  |                    [ D1 ] metadata only:
-  |                    encrypted names, ivs, chunk map
-```
-
-the worker never holds your key and never sees plaintext. it is a router: chunks
-to telegram, metadata to D1.
-
-your identity is one 32-byte secret. HKDF derives two things from it: an auth
-token (sent to the server, which stores only its sha-256) and an encryption key
-(never leaves the browser). so the server cannot decrypt your files even if it
-wanted to, and cannot recover your account if you lose the key.
-
-### the api
-
-every route is under `/api`, authenticated by the derived token. `/api/setup/*`
-is the exception: it needs no auth and only answers while `TG_CHAT_ID` is unset
-or `"SETUP"`.
-
-| route | what it does |
-|---|---|
-| `POST /hello` | upsert the user. gated by `SETUP_CODE` for new chests when that secret is set |
-| `GET /files` | timeline, keyset-paginated newest-first, 500 rows a page |
-| `POST /files` | register a file and its chunk map |
-| `POST /hashes` | dedupe check — which content hashes are already stored |
-| `POST /files/bulk` | bulk favorite / trash / restore / delete / add-to-album |
-| `GET/POST /albums` | list and create albums |
-| `GET /setup/status` | whether setup is still open |
-| `GET /setup/chat-id` | list channels the bot can see |
-
-pagination uses a `<timestamp>_<id>` cursor rather than an offset, so rows that
-share a timestamp are never skipped or repeated.
-
-## limits
-
-| thing | limit | why |
-|---|---|---|
-| chunk size | 18MB | telegram's getFile caps downloads at 20MB |
-| single file size | unlimited | files are chunked |
-| library size | unlimited | the timeline pages 500 rows at a time |
-| upload throughput | ~20 chunks/min | telegram's bot rate limit into one channel |
-| worker requests | 100k/day free | plenty for one household |
-
-the throughput limit is the one that bites: a large first backup takes hours.
-later backups are fast, because dedupe skips everything already stored.
-
-## rules for not losing your stuff
-
-1. the key exists in at least two places you control
-2. never delete the telegram channel or remove the bot from it
-3. keep a second copy of irreplaceable things somewhere else
-
-this is a chest only you can open. that also means only you can lose it.
-
-## license
-
-AGPL-3.0. run it, fork it, change it. if you run a modified version as a service
-for other people, publish your changes.
+AGPL-3.0. See [LICENSE](LICENSE).

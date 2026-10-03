@@ -9,7 +9,9 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "sanduk"
-database_id = "2cf79594-869a-48c9-a4f0-fc64e13da1f4"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
 [vars]
-TG_CHAT_ID = "-1004308966558"
+# Use "SETUP" for first deploy to enable /api/setup/* discovery endpoints.
+# Replace with your real private Telegram channel id (usually starts with -100) after setup.
+TG_CHAT_ID = "SETUP"
