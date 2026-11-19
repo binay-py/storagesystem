@@ -75,8 +75,21 @@ struct FreeUpView: View {
 
                 if let unchecked = plan?.unchecked, unchecked > 0 {
                     Section {
-                        Text("\(unchecked) older \(unchecked == 1 ? "backup hasn't" : "backups haven't") been double-checked yet, so \(unchecked == 1 ? "it isn't" : "they aren't") offered here. Tap Back up now and keep the app open; they are checked after the uploads.")
-                            .font(.footnote).foregroundStyle(.secondary)
+                        if engine.running && engine.status == "Checking older backups" {
+                            HStack {
+                                ProgressView()
+                                Text("Checking \(min(engine.passDone + 1, engine.passTotal)) of \(engine.passTotal)")
+                                Spacer()
+                                Button("Stop") { engine.cancel() }
+                            }
+                        } else {
+                            Button("Check \(unchecked) older \(unchecked == 1 ? "backup" : "backups")") {
+                                Task { await engine.checkOlderBackups(); await load() }
+                            }
+                            .disabled(engine.running)
+                        }
+                    } footer: {
+                        Text("Photos backed up before this version need a one-time check before they can be removed. It reads each original once, so plug in and stay on Wi-Fi for big videos.")
                     }
                 }
             }

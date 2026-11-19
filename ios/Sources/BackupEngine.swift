@@ -224,30 +224,48 @@ final class BackupEngine: ObservableObject {
     private func index(uploader: Uploader, api: SandukAPI, keys: SandukCrypto.Keys,
                        known: inout Set<String>, deadline: Date?, ok: inout Int) async -> String? {
         if searchLabels, let stop = await labelChest(api: api, keys: keys, deadline: deadline) { return stop }
-
-        let unchecked = fetchAll().filter { doneIDs.contains($0.localIdentifier) && ledger[$0.localIdentifier] == nil }
-        guard !unchecked.isEmpty else { return nil }
-        status = "Checking older backups"
-        passDone = 0
-        passTotal = unchecked.count
-        for asset in unchecked {
-            if Task.isCancelled { saveDone(); return "Paused, continues next time" }
-            if let deadline, Date() > deadline { saveDone(); return "Out of time, continues next time" }
-            currentAssetID = asset.localIdentifier
-            do {
-                let found = try await uploader.verify(asset: asset, known: known)
-                // not in the chest (e.g. skipped earlier): remember that, never offer it for removal
-                ledger[asset.localIdentifier] = LedgerEntry(h: found?.hashes ?? [], s: found?.bytes ?? 0, l: nil)
-            } catch {
-                if Task.isCancelled || error is CancellationError { saveDone(); return "Paused, continues next time" }
-                // couldn't read it right now (iCloud, network): try again next run
-            }
-            passDone += 1
-            progress = 1
-            if passDone % 20 == 0 { saveDone() }
-        }
-        saveDone()
         return nil
+    }
+
+    /// "Free up space" → Check older backups. Reads each older original once to
+    /// learn whether the chest has it, which is heavy (big videos, iCloud), so it
+    /// only runs when you ask. Read-only, never uploads.
+    func checkOlderBackups() async {
+        guard current == nil, let server = Keychain.get("server"), let secret = Keychain.get("secret"),
+              let keys = try? SandukCrypto.derive(secret: secret) else { return }
+        let api = SandukAPI(base: server, token: keys.authToken, session: SandukAPI.makeSession(wifiOnly: false))
+        let uploader = Uploader(api: api, key: keys.encKey)
+        let t = Task(priority: .utility) {
+            guard let known = try? await api.hashes() else { self.lastMessage = "Offline"; return }
+            let unchecked = self.fetchAll().filter {
+                self.doneIDs.contains($0.localIdentifier) && self.ledger[$0.localIdentifier] == nil
+            }
+            guard !unchecked.isEmpty else { return }
+            self.running = true
+            self.status = "Checking older backups"
+            self.passDone = 0
+            self.passTotal = unchecked.count
+            for asset in unchecked {
+                if Task.isCancelled { break }
+                self.currentAssetID = asset.localIdentifier
+                do {
+                    let found = try await uploader.verify(asset: asset, known: known)
+                    // not in the chest: remember that, never offer it for removal
+                    self.ledger[asset.localIdentifier] = LedgerEntry(h: found?.hashes ?? [], s: found?.bytes ?? 0, l: nil)
+                } catch {
+                    if Task.isCancelled || error is CancellationError { break }
+                }
+                self.passDone += 1
+                if self.passDone % 20 == 0 { self.saveDone() }
+            }
+            self.saveDone()
+            self.running = false
+            self.currentAssetID = nil
+        }
+        current = t
+        await t.value
+        current = nil
+        running = false
     }
 
     private func labelChest(api: SandukAPI, keys: SandukCrypto.Keys, deadline: Date?) async -> String? {
@@ -290,7 +308,11 @@ final class BackupEngine: ObservableObject {
             do {
                 let t = try await api.thumb(fileId: item.id)
                 if let plain = try? SandukCrypto.open(t.ciphertext, key: keys.encKey, iv: t.iv) {
-                    description = await Labeler.describe(imageData: plain, isVideo: item.video)
+                    let isVideo = item.video
+                    description = await Task.detached(priority: .background) {
+                        await Labeler.describe(imageData: plain, isVideo: isVideo)
+                    }.value
+                    try? await Task.sleep(nanoseconds: 150_000_000) // keep the phone responsive
                 }
             } catch {
                 if error is URLError { _ = await flush(); return offline }
@@ -410,7 +432,7 @@ final class BackupEngine: ObservableObject {
                 lastMessage = "Paused: Low Power Mode is on"; return
             }
         }
-        let t = Task { await self.pass(trigger: trigger, deadline: deadline) }
+        let t = Task(priority: .utility) { await self.pass(trigger: trigger, deadline: deadline) }
         current = t
         await t.value
         current = nil
