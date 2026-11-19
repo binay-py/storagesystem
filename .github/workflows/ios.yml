@@ -161,4 +161,5 @@ jobs:
 
       - name: Remove API key
         if: always()
+        working-directory: .
         run: rm -rf "$RUNNER_TEMP/keys"
