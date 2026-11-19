@@ -51,6 +51,10 @@ struct ChestWebView: UIViewRepresentable {
         web.allowsBackForwardNavigationGestures = true
         web.isOpaque = false
         web.scrollView.contentInsetAdjustmentBehavior = .never // the page handles the notch itself
+        // the page zooms photos itself; never zoom the whole app on a double tap or pinch
+        web.scrollView.minimumZoomScale = 1
+        web.scrollView.maximumZoomScale = 1
+        web.scrollView.pinchGestureRecognizer?.isEnabled = false
         web.backgroundColor = .systemBackground
         let refresh = UIRefreshControl()
         refresh.addTarget(context.coordinator, action: #selector(Coordinator.reload(_:)), for: .valueChanged)
