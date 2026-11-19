@@ -194,6 +194,12 @@ final class BackupEngine: ObservableObject {
 
     // MARK: running
 
+    /// Posted when new items reached the chest, so the Chest tab can refresh.
+    static let chestChanged = Notification.Name("SandukChestChanged")
+    static func announceChestChanged() {
+        NotificationCenter.default.post(name: chestChanged, object: nil)
+    }
+
     func cancel() { current?.cancel() }
 
     /// Runs one backup pass. If one is already going, waits for it instead.
@@ -260,6 +266,8 @@ final class BackupEngine: ObservableObject {
                         UserDefaults.standard.set(NSNumber(value: uploadedBytes), forKey: "uploadedBytes")
                     } else { skipped += 1 }
                     if (ok + skipped) % 10 == 0 { saveDone(); updateBadge() }
+                    // let the Chest tab show new photos while the backup is still going
+                    if outcome == .uploaded, ok == 1 || ok % 5 == 0 { Self.announceChestChanged() }
                 } catch {
                     if Task.isCancelled || error is CancellationError {
                         stopReason = "Paused, continues next time"; break
@@ -280,6 +288,7 @@ final class BackupEngine: ObservableObject {
 
         running = false
         currentAssetID = nil
+        if ok > 0 { Self.announceChestChanged() }
         progress = 0
         UserDefaults.standard.set(Date(), forKey: "lastRun")
         saveDone()

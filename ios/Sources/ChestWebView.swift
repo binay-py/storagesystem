@@ -43,6 +43,7 @@ struct ChestWebView: UIViewRepresentable {
         refresh.addTarget(context.coordinator, action: #selector(Coordinator.reload(_:)), for: .valueChanged)
         web.scrollView.refreshControl = refresh
         context.coordinator.web = web
+        context.coordinator.observeBackups()
         if let url = URL(string: server) { web.load(URLRequest(url: url)) }
         return web
     }
@@ -71,6 +72,28 @@ struct ChestWebView: UIViewRepresentable {
         let server: String
         weak var web: WKWebView?
         init(server: String) { self.server = server }
+        private var observer: NSObjectProtocol?
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
+        /// New photos were backed up: ask the page to fetch the list again.
+        /// Pages without sandukSync (older web app) get a plain reload.
+        func observeBackups() {
+            observer = NotificationCenter.default.addObserver(
+                forName: BackupEngine.chestChanged, object: nil, queue: .main) { [weak self] _ in
+                self?.syncPage()
+            }
+        }
+
+        func syncPage() {
+            guard let web, !web.isLoading else { return }
+            web.evaluateJavaScript("typeof window.sandukSync === 'function'") { result, _ in
+                if (result as? Bool) == true {
+                    web.evaluateJavaScript("window.sandukSync(); 0", completionHandler: nil)
+                } else {
+                    web.reload()
+                }
+            }
+        }
 
         // the web app uses confirm() before deleting forever, locking, deleting an
         // album. a web view without these handlers silently answers "cancel".
