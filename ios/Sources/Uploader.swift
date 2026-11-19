@@ -78,8 +78,9 @@ final class Uploader {
 
         let thumb = await thumbnail(for: asset)
         let share = paired == nil ? 1.0 : 0.6
+        let takenAt = asset.creationDate.map { Int64($0.timeIntervalSince1970 * 1000) }
         let photoId = try await upload(file: mainURL, size: mainSize, part: main, hash: mainHash,
-                                       thumb: thumb) { progress($0 * share) }
+                                       thumb: thumb, takenAt: takenAt) { progress($0 * share) }
         var hashes = [mainHash]
         var bytes = mainSize
 
@@ -90,7 +91,7 @@ final class Uploader {
             let vHash = try SandukCrypto.contentHash(fileURL: vURL, size: vSize,
                                                      name: paired.name, modifiedMs: modifiedMs)
             let videoId = try await upload(file: vURL, size: vSize, part: paired, hash: vHash,
-                                           thumb: nil) { progress(0.6 + $0 * 0.4) }
+                                           thumb: nil, takenAt: takenAt) { progress(0.6 + $0 * 0.4) }
             try await api.pairLive(photoId: photoId, videoId: videoId)
             hashes.append(vHash)
             bytes += vSize
@@ -101,7 +102,7 @@ final class Uploader {
     // MARK: one file
 
     private func upload(file: URL, size: Int64, part: Part, hash: String, thumb: Data?,
-                        progress: (Double) -> Void) async throws -> String {
+                        takenAt: Int64?, progress: (Double) -> Void) async throws -> String {
         let nameIv = SandukCrypto.randomIV()
         let nameEnc = try SandukCrypto.seal(Data(part.name.utf8), key: key, iv: nameIv).base64EncodedString()
         let chunkCount = max(1, Int((size + Int64(Self.chunkSize) - 1) / Int64(Self.chunkSize)))
@@ -117,9 +118,16 @@ final class Uploader {
         if let id {
             fileId = id
         } else {
+            var blurEnc: String?, blurIv: String?
+            if let thumb, let blur = Self.blur(from: thumb) {
+                let iv = SandukCrypto.randomIV()
+                blurEnc = try? SandukCrypto.seal(blur, key: key, iv: iv).base64EncodedString()
+                blurIv = blurEnc == nil ? nil : iv.base64EncodedString()
+            }
             fileId = try await api.createFile(nameEnc: nameEnc, nameIv: nameIv.base64EncodedString(),
                                               mime: part.mime, size: size, chunkCount: chunkCount,
-                                              contentHash: hash)
+                                              contentHash: hash, takenAt: takenAt,
+                                              blurEnc: blurEnc, blurIv: blurIv)
         }
 
         let h = try FileHandle(forReadingFrom: file)
@@ -175,6 +183,20 @@ final class Uploader {
                 c.resume(returning: img?.jpegData(compressionQuality: 0.72))
             }
         }
+    }
+
+    /// 16px version of the thumbnail, a few hundred bytes (same idea as makeBlur in app.js).
+    static func blur(from thumb: Data) -> Data? {
+        guard let img = UIImage(data: thumb) else { return nil }
+        let scale = 16 / max(img.size.width, img.size.height)
+        let size = CGSize(width: max(1, (img.size.width * scale).rounded()),
+                          height: max(1, (img.size.height * scale).rounded()))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let small = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            img.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return small.jpegData(compressionQuality: 0.5)
     }
 
     private static func size(of url: URL) throws -> Int64 {

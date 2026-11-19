@@ -35,6 +35,7 @@ struct ChestWebView: UIViewRepresentable {
 
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
+        web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
         web.isOpaque = false
         web.backgroundColor = UIColor(red: 0.075, green: 0.071, blue: 0.082, alpha: 1)
@@ -66,10 +67,34 @@ struct ChestWebView: UIViewRepresentable {
         store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let server: String
         weak var web: WKWebView?
         init(server: String) { self.server = server }
+
+        // the web app uses confirm() before deleting forever, locking, deleting an
+        // album. a web view without these handlers silently answers "cancel".
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
+            alert.addAction(UIAlertAction(title: "OK", style: .destructive) { _ in completionHandler(true) })
+            present(alert, from: webView, orElse: { completionHandler(false) })
+        }
+
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+            present(alert, from: webView, orElse: completionHandler)
+        }
+
+        private func present(_ alert: UIAlertController, from view: UIView, orElse fallback: @escaping () -> Void) {
+            var top = view.window?.rootViewController
+            while let next = top?.presentedViewController { top = next }
+            guard let top else { fallback(); return }
+            top.present(alert, animated: true)
+        }
 
         @objc func reload(_ sender: UIRefreshControl) {
             web?.reload()

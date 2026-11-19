@@ -107,11 +107,17 @@ struct SandukAPI {
     }
 
     func createFile(nameEnc: String, nameIv: String, mime: String, size: Int64,
-                    chunkCount: Int, contentHash: String) async throws -> String {
-        let obj = try await sendJSON("POST", "/files", json: [
+                    chunkCount: Int, contentHash: String, takenAt: Int64?,
+                    blurEnc: String?, blurIv: String?) async throws -> String {
+        var body: [String: Any] = [
             "nameEnc": nameEnc, "nameIv": nameIv, "mime": mime,
             "size": size, "chunkCount": chunkCount, "contentHash": contentHash,
-        ])
+        ]
+        // when it was shot, so the timeline sorts by that instead of upload time
+        if let takenAt { body["takenAt"] = takenAt }
+        // a ~16px preview that rides in the row and shows before the thumbnail loads
+        if let blurEnc, let blurIv { body["blurEnc"] = blurEnc; body["blurIv"] = blurIv }
+        let obj = try await sendJSON("POST", "/files", json: body)
         guard let id = obj["id"] as? String else { throw HTTPError(status: 500, message: "no id", code: nil, retryAfter: nil) }
         return id
     }
