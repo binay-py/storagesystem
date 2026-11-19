@@ -5,8 +5,17 @@ struct ContentView: View {
     @EnvironmentObject private var engine: BackupEngine
 
     var body: some View {
-        NavigationStack {
-            if engine.configured { MainView() } else { SetupView() }
+        if engine.configured, let server = Keychain.get("server"), let secret = Keychain.get("secret") {
+            TabView {
+                ChestWebView(server: server, secret: secret)
+                    .background(Color(red: 0.075, green: 0.071, blue: 0.082).ignoresSafeArea())
+                    .tabItem { Label("Chest", systemImage: "photo.on.rectangle") }
+                NavigationStack { MainView() }
+                    .tabItem { Label("Backup", systemImage: "lock.icloud") }
+            }
+            .tint(Color(red: 0.79, green: 0.6, blue: 0.23))
+        } else {
+            NavigationStack { SetupView() }
         }
     }
 }

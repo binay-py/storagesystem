@@ -74,6 +74,7 @@ final class BackupEngine: ObservableObject {
         cancel()
         Keychain.delete("secret")
         Keychain.delete("server")
+        ChestWebView.clearWebData()
         configured = false
     }
 
