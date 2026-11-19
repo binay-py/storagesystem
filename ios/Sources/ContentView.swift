@@ -6,17 +6,58 @@ struct ContentView: View {
 
     var body: some View {
         if engine.configured, let server = Keychain.get("server"), let secret = Keychain.get("secret") {
-            TabView {
-                ChestWebView(server: server, secret: secret)
-                    .background(Color(red: 0.075, green: 0.071, blue: 0.082).ignoresSafeArea())
-                    .tabItem { Label("Chest", systemImage: "photo.on.rectangle") }
-                NavigationStack { MainView() }
-                    .tabItem { Label("Backup", systemImage: "lock.icloud") }
-            }
-            .tint(Color(red: 0.79, green: 0.6, blue: 0.23))
+            LibraryScreen(server: server, secret: secret)
         } else {
-            NavigationStack { SetupView() }
+            NavigationStack { SetupView() }.tint(sandukGold)
         }
+    }
+}
+
+/// The library fills the screen with one tab bar (the page's own: Photos,
+/// Collections, Search, Backup). Backup opens the native backup screen as a sheet.
+private struct LibraryScreen: View {
+    @EnvironmentObject private var engine: BackupEngine
+    let server: String
+    let secret: String
+    @State private var showBackup = false
+    @State private var pageHasBackupTab = true
+
+    var body: some View {
+        ChestWebView(server: server, secret: secret,
+                     onBackup: { showBackup = true },
+                     onBackupTab: { pageHasBackupTab = $0 })
+            .ignoresSafeArea()
+            .background(Color(.systemBackground).ignoresSafeArea())
+            .overlay(alignment: .topTrailing) {
+                // an older web app has no Backup tab; keep the screen reachable
+                if !pageHasBackupTab {
+                    Button { showBackup = true } label: {
+                        Image(systemName: "icloud.and.arrow.up").font(.title3)
+                            .padding(10).background(.regularMaterial, in: Circle())
+                    }
+                    .padding(.trailing, 12).padding(.top, 4)
+                }
+            }
+            .sheet(isPresented: $showBackup) {
+                NavigationStack {
+                    MainView()
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) { Button("Done") { showBackup = false } }
+                        }
+                }
+                .environmentObject(engine)
+                .tint(sandukGold)
+            }
+            .task {
+                // what the Backup tab used to do on launch
+                if PHPhotoLibrary.authorizationStatus(for: .readWrite) == .notDetermined {
+                    _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+                    if engine.notifications { await BackupEngine.askNotificationPermission() }
+                }
+                engine.refreshCounts()
+                engine.startWatching()
+                await engine.run(trigger: .auto)
+            }
     }
 }
 
@@ -54,7 +95,7 @@ private struct SetupView: View {
                     .disabled(busy || server.isEmpty || secret.isEmpty)
             }
         }
-        .navigationTitle("Sanduk Backup")
+        .navigationTitle("Sanduk")
         .alert("This chest is empty", isPresented: $emptyWarning) {
             Button("Use it anyway") { engine.save(server: server, secret: secret) }
             Button("Check the key", role: .cancel) {}

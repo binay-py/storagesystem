@@ -10,8 +10,15 @@ import WebKit
 struct ChestWebView: UIViewRepresentable {
     let server: String
     let secret: String
+    var onBackup: () -> Void = {}
+    var onBackupTab: (Bool) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator(server: server) }
+    func makeCoordinator() -> Coordinator {
+        let c = Coordinator(server: server)
+        c.onBackup = onBackup
+        c.onBackupTab = onBackupTab
+        return c
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -31,14 +38,20 @@ struct ChestWebView: UIViewRepresentable {
             """
             config.userContentController.addUserScript(
                 WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            // tells the page it runs inside the app: it shows a Backup tab
+            config.userContentController.addUserScript(WKUserScript(
+                source: "document.documentElement.classList.add('sanduk-ios');",
+                injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
+        config.userContentController.add(WeakMessageHandler(context.coordinator), name: "sanduk")
 
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
         web.isOpaque = false
-        web.backgroundColor = UIColor(red: 0.075, green: 0.071, blue: 0.082, alpha: 1)
+        web.scrollView.contentInsetAdjustmentBehavior = .never // the page handles the notch itself
+        web.backgroundColor = .systemBackground
         let refresh = UIRefreshControl()
         refresh.addTarget(context.coordinator, action: #selector(Coordinator.reload(_:)), for: .valueChanged)
         web.scrollView.refreshControl = refresh
@@ -68,10 +81,22 @@ struct ChestWebView: UIViewRepresentable {
         store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let server: String
         weak var web: WKWebView?
         init(server: String) { self.server = server }
+        var onBackup: () -> Void = {}
+        var onBackupTab: (Bool) -> Void = { _ in }
+
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            if (message.body as? String) == "backup" { onBackup() }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.evaluateJavaScript("!!document.getElementById('tab-backup')") { [weak self] result, _ in
+                self?.onBackupTab((result as? Bool) ?? false)
+            }
+        }
         private var observer: NSObjectProtocol?
         deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
 
@@ -139,5 +164,15 @@ struct ChestWebView: UIViewRepresentable {
             }
             decisionHandler(.allow)
         }
+    }
+}
+
+/// WKUserContentController keeps its handlers alive; this keeps it from
+/// keeping the coordinator (and the web view) alive with it.
+private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(c, didReceive: message)
     }
 }

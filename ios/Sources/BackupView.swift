@@ -4,7 +4,8 @@
 import Photos
 import SwiftUI
 
-let sandukGold = Color(red: 0.79, green: 0.6, blue: 0.23)
+// the one accent color, same blue as the web app (named for history)
+let sandukGold = Color(red: 0.04, green: 0.42, blue: 1.0)
 
 struct MainView: View {
     @EnvironmentObject private var engine: BackupEngine
