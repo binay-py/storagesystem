@@ -64,8 +64,8 @@ final class Uploader {
     // MARK: one asset
 
     func backup(asset: PHAsset, known: Set<String>,
-                progress: @escaping (Double) -> Void) async throws -> (Outcome, [String]) {
-        guard let parts = Self.parts(of: asset) else { return (.nothingToUpload, []) }
+                progress: @escaping (Double) -> Void) async throws -> (Outcome, [String], Int64) {
+        guard let parts = Self.parts(of: asset) else { return (.nothingToUpload, [], 0) }
         let main = parts.main, paired = parts.paired
         let modifiedMs = Int64((asset.creationDate ?? Date()).timeIntervalSince1970 * 1000)
 
@@ -74,13 +74,14 @@ final class Uploader {
         let mainSize = try Self.size(of: mainURL)
         let mainHash = try SandukCrypto.contentHash(fileURL: mainURL, size: mainSize,
                                                     name: main.name, modifiedMs: modifiedMs)
-        if known.contains(mainHash) { return (.alreadyInChest, [mainHash]) }
+        if known.contains(mainHash) { return (.alreadyInChest, [mainHash], 0) }
 
         let thumb = await thumbnail(for: asset)
         let share = paired == nil ? 1.0 : 0.6
         let photoId = try await upload(file: mainURL, size: mainSize, part: main, hash: mainHash,
                                        thumb: thumb) { progress($0 * share) }
         var hashes = [mainHash]
+        var bytes = mainSize
 
         if let paired {
             let vURL = try await export(paired.resource)
@@ -92,8 +93,9 @@ final class Uploader {
                                            thumb: nil) { progress(0.6 + $0 * 0.4) }
             try await api.pairLive(photoId: photoId, videoId: videoId)
             hashes.append(vHash)
+            bytes += vSize
         }
-        return (.uploaded, hashes)
+        return (.uploaded, hashes, bytes)
     }
 
     // MARK: one file

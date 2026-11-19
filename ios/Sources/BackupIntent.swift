@@ -14,7 +14,7 @@ struct BackUpNowIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // Shortcuts gives an action about 30 s in the background; stop starting new
         // items before then. Anything cut off resumes on the next run.
-        await BackupEngine.shared.run(deadline: Date().addingTimeInterval(22))
+        await BackupEngine.shared.run(trigger: .shortcut, deadline: Date().addingTimeInterval(22))
         BackgroundJobs.schedule()
         return .result(dialog: IntentDialog(stringLiteral: BackupEngine.shared.lastMessage ?? "done"))
     }

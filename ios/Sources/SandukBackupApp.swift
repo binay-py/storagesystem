@@ -15,7 +15,17 @@ struct SandukBackupApp: App {
             ContentView().environmentObject(engine)
         }
         .onChange(of: phase) { _, p in
-            if p == .background { BackgroundJobs.schedule() }
+            switch p {
+            case .background:
+                BackgroundJobs.schedule()
+            case .active:
+                // opening the app is a good moment: back up whatever is new
+                engine.startWatching()
+                engine.refreshCounts()
+                Task { await engine.run(trigger: .auto) }
+            default:
+                break
+            }
         }
     }
 }
@@ -55,7 +65,7 @@ enum BackgroundJobs {
             Task { @MainActor in BackupEngine.shared.cancel() }
         }
         Task { @MainActor in
-            await BackupEngine.shared.run(deadline: deadline)
+            await BackupEngine.shared.run(trigger: .background, deadline: deadline)
             task.setTaskCompleted(success: true)
         }
     }
