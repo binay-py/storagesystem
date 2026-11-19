@@ -25,6 +25,8 @@ final class BackupEngine: ObservableObject {
     @Published private(set) var lastMessage: String?
     @Published private(set) var configured = false
     @Published private(set) var uploadedBytes: Int64
+    @Published private(set) var backgroundQueued = BackgroundUploads.shared.count  // handed to iOS, uploading
+    private var finishedInBackground = 0
 
     // settings
     @Published var autoBackup: Bool { didSet { save("autoBackup", autoBackup); if autoBackup { BackgroundJobs.schedule() } } }
@@ -306,6 +308,30 @@ final class BackupEngine: ObservableObject {
         return await flush() ? nil : offline
     }
 
+    /// BackgroundUploads finished (or gave up on) one asset, possibly while the
+    /// app was in the background or had been relaunched just for this.
+    func backgroundItemFinished(assetID: String, hashes: [String], bytes: Int64, ok: Bool) {
+        backgroundQueued = BackgroundUploads.shared.count
+        if ok {
+            doneIDs.insert(assetID)
+            if !hashes.isEmpty { ledger[assetID] = LedgerEntry(h: hashes, s: bytes, l: nil) }
+            uploadedBytes += bytes
+            UserDefaults.standard.set(NSNumber(value: uploadedBytes), forKey: "uploadedBytes")
+            finishedInBackground += 1
+            saveDone()
+        }
+        if backgroundQueued == 0 || finishedInBackground % 5 == 0 { Self.announceChestChanged() }
+        if Self.photosAllowed { refreshCounts() }
+        if backgroundQueued == 0 {
+            if finishedInBackground > 0, UIApplication.shared.applicationState != .active {
+                notify(finishedInBackground == 1 ? "1 new item backed up to your chest."
+                                                 : "\(finishedInBackground) new items backed up to your chest.")
+            }
+            if finishedInBackground > 0 { lastMessage = "Everything is backed up" }
+            finishedInBackground = 0
+        }
+    }
+
     /// A short, readable reason for a failed item.
     static func explain(_ error: Error, asset: PHAsset) -> String {
         let kind = asset.mediaType == .video ? "a video" : "a photo"
@@ -405,7 +431,7 @@ final class BackupEngine: ObservableObject {
             Task { @MainActor in BackupEngine.shared.cancel() }
         }
 
-        var ok = 0, skipped = 0, failed = 0
+        var ok = 0, skipped = 0, failed = 0, queuedNow = 0
         var failReason: String?
         var stopReason: String?
         do {
@@ -416,24 +442,33 @@ final class BackupEngine: ObservableObject {
 
             status = "Checking your chest…"
             var known = try await api.hashes()
-            let pending = fetchAll().filter { !doneIDs.contains($0.localIdentifier) }
+            let queue = BackgroundUploads.shared
+            let pending = fetchAll().filter { !doneIDs.contains($0.localIdentifier) && !queue.isQueued($0.localIdentifier) }
             passTotal = pending.count
 
             for asset in pending {
                 if Task.isCancelled { stopReason = "Paused, continues next time"; break }
                 if let deadline, Date() > deadline { stopReason = "Out of time, continues next time"; break }
-                status = asset.mediaType == .video ? "Uploading video" : "Uploading photo"
+                // keep at most ~1.5 GB of encrypted chunks waiting on disk
+                if queue.queuedBytes > 1_500_000_000 { stopReason = "Uploading in the background, more after that"; break }
+                status = asset.mediaType == .video ? "Preparing video" : "Preparing photo"
                 currentAssetID = asset.localIdentifier
                 progress = 0
                 do {
-                    let (outcome, hashes, bytes) = try await uploader.backup(asset: asset, known: known) { p in
-                        Task { @MainActor in BackupEngine.shared.progress = p }
-                    }
+                    let r = try await uploader.prepare(asset: asset, known: known)
+                    let (outcome, hashes, bytes) = (r.outcome, r.hashes, r.bytes)
                     known.formUnion(hashes)
+                    passDone += 1
+                    if outcome == .queued {
+                        // iOS uploads it from here, even if you leave the app
+                        queue.enqueue(assetID: asset.localIdentifier, hashes: hashes, bytes: bytes, chunks: r.chunks)
+                        backgroundQueued = queue.count
+                        queuedNow += 1
+                        continue
+                    }
                     doneIDs.insert(asset.localIdentifier)
                     if !hashes.isEmpty { ledger[asset.localIdentifier] = LedgerEntry(h: hashes, s: bytes, l: nil) }
                     doneCount += 1
-                    passDone += 1
                     if outcome == .uploaded {
                         ok += 1
                         uploadedBytes += bytes
@@ -476,6 +511,7 @@ final class BackupEngine: ObservableObject {
 
         var bits: [String] = []
         if ok > 0 { bits.append("\(ok) backed up") }
+        if queuedNow > 0 { bits.append("\(queuedNow) uploading in the background, you can leave the app") }
         if skipped > 0 { bits.append("\(skipped) were already in the chest") }
         if failed > 0 { bits.append("\(failed) failed, will retry" + (failReason.map { " (\($0))" } ?? "")) }
         if let stopReason { bits.append(stopReason) }

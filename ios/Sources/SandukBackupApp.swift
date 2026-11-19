@@ -3,11 +3,13 @@ import SwiftUI
 
 @main
 struct SandukBackupApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var phase
     @StateObject private var engine = BackupEngine.shared
 
     init() {
         BackgroundJobs.register() // must happen before launch finishes
+        BackgroundUploads.shared.wake() // collect uploads that finished while we were away
     }
 
     var body: some Scene {
@@ -22,6 +24,7 @@ struct SandukBackupApp: App {
                 // opening the app is a good moment: back up whatever is new
                 engine.startWatching()
                 engine.refreshCounts()
+                BackgroundUploads.shared.reconcile() // restart uploads iOS dropped (e.g. after a force-quit)
                 Task { await engine.run(trigger: .auto) }
             default:
                 break

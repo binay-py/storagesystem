@@ -155,6 +155,7 @@ private struct StatusCard: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(engine.running ? engine.status
+                         : engine.backgroundQueued > 0 ? "Uploading \(engine.backgroundQueued)"
                          : (engine.remaining == 0 ? "All backed up" : "\(engine.remaining) waiting"))
                         .font(.title3.weight(.semibold))
                     if engine.running {
@@ -164,6 +165,11 @@ private struct StatusCard: View {
                     } else {
                         Text("\(Int((fraction * 100).rounded(.down)))% of your library")
                             .font(.subheadline).foregroundStyle(.secondary)
+                        if engine.backgroundQueued > 0 {
+                            Label("Continues in the background. You can close the app, just don't swipe it away.",
+                                  systemImage: "arrow.up.circle")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
                         if let last = engine.lastRun {
                             Text("Last run \(last.formatted(.relative(presentation: .named)))")
                                 .font(.footnote).foregroundStyle(.secondary)

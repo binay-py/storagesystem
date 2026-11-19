@@ -19,7 +19,7 @@ final class Uploader {
         self.key = key
     }
 
-    enum Outcome { case uploaded, alreadyInChest, nothingToUpload }
+    enum Outcome { case uploaded, alreadyInChest, nothingToUpload, queued }
 
     struct Part {
         let resource: PHAssetResource
@@ -109,6 +109,108 @@ final class Uploader {
         let size = try Self.size(of: url)
         let hash = try SandukCrypto.contentHash(fileURL: url, size: size, name: parts.main.name, modifiedMs: modifiedMs)
         return known.contains(hash) ? ([hash], size) : nil
+    }
+
+    // MARK: background variant
+
+    /// Like backup(), but the chunks are encrypted into files and handed to
+    /// BackgroundUploads, which iOS uploads even after you leave the app. The file
+    /// rows, thumbnail and live-photo pairing are done right away (small requests).
+    /// Returns the chunks still to send; empty when the chest already had it all.
+    func prepare(asset: PHAsset, known: Set<String>) async throws
+        -> (outcome: Outcome, hashes: [String], bytes: Int64, chunks: [BackgroundUploads.Chunk]) {
+        guard let parts = Self.parts(of: asset) else { return (.nothingToUpload, [], 0, []) }
+        let main = parts.main, paired = parts.paired
+        let modifiedMs = Int64((asset.creationDate ?? Date()).timeIntervalSince1970 * 1000)
+
+        let mainURL = try await export(main.resource)
+        defer { try? FileManager.default.removeItem(at: mainURL) }
+        let mainSize = try Self.size(of: mainURL)
+        let mainHash = try SandukCrypto.contentHash(fileURL: mainURL, size: mainSize,
+                                                    name: main.name, modifiedMs: modifiedMs)
+        if known.contains(mainHash) { return (.alreadyInChest, [mainHash], mainSize, []) }
+
+        let thumb = await thumbnail(for: asset)
+        let takenAt = asset.creationDate.map { Int64($0.timeIntervalSince1970 * 1000) }
+        var chunks: [BackgroundUploads.Chunk] = []
+        do {
+            let photo = try await stage(file: mainURL, size: mainSize, part: main, hash: mainHash,
+                                        thumb: thumb, takenAt: takenAt)
+            chunks += photo.chunks
+            var hashes = [mainHash]
+            var bytes = mainSize
+            if let paired {
+                let vURL = try await export(paired.resource)
+                defer { try? FileManager.default.removeItem(at: vURL) }
+                let vSize = try Self.size(of: vURL)
+                let vHash = try SandukCrypto.contentHash(fileURL: vURL, size: vSize,
+                                                         name: paired.name, modifiedMs: modifiedMs)
+                let video = try await stage(file: vURL, size: vSize, part: paired, hash: vHash,
+                                            thumb: nil, takenAt: takenAt)
+                chunks += video.chunks
+                try await api.pairLive(photoId: photo.id, videoId: video.id)
+                hashes.append(vHash)
+                bytes += vSize
+            }
+            return (chunks.isEmpty ? .uploaded : .queued, hashes, bytes, chunks)
+        } catch {
+            for c in chunks {
+                try? FileManager.default.removeItem(at: c.file)
+                try? FileManager.default.removeItem(at: c.file.appendingPathExtension("json"))
+            }
+            throw error
+        }
+    }
+
+    private func stage(file: URL, size: Int64, part: Part, hash: String, thumb: Data?,
+                       takenAt: Int64?) async throws -> (id: String, chunks: [BackgroundUploads.Chunk]) {
+        let (fileId, chunkCount, already) = try await begin(size: size, part: part, hash: hash,
+                                                            thumb: thumb, takenAt: takenAt)
+        if let thumb {
+            let tIv = SandukCrypto.randomIV()
+            if let tCt = try? SandukCrypto.seal(thumb, key: key, iv: tIv) {
+                try? await api.putThumb(fileId: fileId, iv: tIv, ciphertext: tCt)
+            }
+        }
+        let h = try FileHandle(forReadingFrom: file)
+        defer { try? h.close() }
+        var out: [BackgroundUploads.Chunk] = []
+        for i in 0..<chunkCount where !already.contains(i) {
+            try Task.checkCancellation()
+            try h.seek(toOffset: UInt64(i) * UInt64(Self.chunkSize))
+            let plain = try h.read(upToCount: Self.chunkSize) ?? Data()
+            let iv = SandukCrypto.randomIV()
+            let ct = try SandukCrypto.seal(plain, key: key, iv: iv)
+            let url = BackgroundUploads.dir.appendingPathComponent("\(fileId).\(i).bin")
+            try ct.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            let c = BackgroundUploads.Chunk(fileId: fileId, idx: i, iv: iv, file: url, sha: SandukCrypto.sha256Hex(ct))
+            BackgroundUploads.shared.writeMeta(c)
+            out.append(c)
+        }
+        if out.isEmpty { try await api.complete(fileId: fileId) } // every chunk was already there
+        return (fileId, out)
+    }
+
+    /// Create the file row, or find an interrupted upload of the same file.
+    private func begin(size: Int64, part: Part, hash: String, thumb: Data?,
+                       takenAt: Int64?) async throws -> (id: String, chunkCount: Int, already: Set<Int>) {
+        let chunkCount = max(1, Int((size + Int64(Self.chunkSize) - 1) / Int64(Self.chunkSize)))
+        if let found = try? await api.resume(hash: hash, size: size, chunks: chunkCount) {
+            return (found.id, chunkCount, found.done)
+        }
+        let nameIv = SandukCrypto.randomIV()
+        let nameEnc = try SandukCrypto.seal(Data(part.name.utf8), key: key, iv: nameIv).base64EncodedString()
+        var blurEnc: String?, blurIv: String?
+        if let thumb, let blur = Self.blur(from: thumb) {
+            let iv = SandukCrypto.randomIV()
+            blurEnc = try? SandukCrypto.seal(blur, key: key, iv: iv).base64EncodedString()
+            blurIv = blurEnc == nil ? nil : iv.base64EncodedString()
+        }
+        let id = try await api.createFile(nameEnc: nameEnc, nameIv: nameIv.base64EncodedString(),
+                                          mime: part.mime, size: size, chunkCount: chunkCount,
+                                          contentHash: hash, takenAt: takenAt,
+                                          blurEnc: blurEnc, blurIv: blurIv)
+        return (id, chunkCount, [])
     }
 
     // MARK: one file
