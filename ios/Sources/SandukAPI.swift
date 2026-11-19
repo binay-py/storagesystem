@@ -138,6 +138,13 @@ struct SandukAPI {
         _ = try await sendJSON("POST", "/files/\(fileId)/complete")
     }
 
+    /// Encrypted search labels, matched to files by content hash. Returns how many files got them.
+    @discardableResult
+    func postLabels(_ items: [[String: String]]) async throws -> Int {
+        let obj = try await sendJSON("POST", "/labels", json: ["items": items])
+        return (obj["updated"] as? NSNumber)?.intValue ?? 0
+    }
+
     func pairLive(photoId: String, videoId: String) async throws {
         _ = try await sendJSON("POST", "/files/\(photoId)/live", json: ["videoId": videoId])
     }

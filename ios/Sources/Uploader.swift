@@ -74,7 +74,8 @@ final class Uploader {
         let mainSize = try Self.size(of: mainURL)
         let mainHash = try SandukCrypto.contentHash(fileURL: mainURL, size: mainSize,
                                                     name: main.name, modifiedMs: modifiedMs)
-        if known.contains(mainHash) { return (.alreadyInChest, [mainHash], 0) }
+        // bytes here = size on the phone (for "free up space"), not uploaded bytes
+        if known.contains(mainHash) { return (.alreadyInChest, [mainHash], mainSize) }
 
         let thumb = await thumbnail(for: asset)
         let share = paired == nil ? 1.0 : 0.6

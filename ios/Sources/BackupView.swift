@@ -12,6 +12,7 @@ struct MainView: View {
     @State private var photos = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var confirmSkip = false
     @State private var confirmForget = false
+    @State private var showFreeUp = false
 
     var body: some View {
         List {
@@ -45,6 +46,14 @@ struct MainView: View {
             }
 
             Section {
+                Button { showFreeUp = true } label: {
+                    Label("Free up space on this iPhone", systemImage: "iphone.and.arrow.forward")
+                }
+            } footer: {
+                Text("Remove photos and videos that are safely in your chest.")
+            }
+
+            Section {
                 Toggle(isOn: $engine.autoBackup) {
                     Label("Auto backup", systemImage: "arrow.triangle.2.circlepath")
                 }
@@ -54,8 +63,9 @@ struct MainView: View {
                     Label("Pause in Low Power Mode", systemImage: "battery.25")
                 }
                 Toggle(isOn: $engine.notifications) { Label("Notifications", systemImage: "bell.badge") }
+                Toggle(isOn: $engine.searchLabels) { Label("Make photos searchable", systemImage: "text.magnifyingglass") }
             } header: { Text("Settings") } footer: {
-                Text("Auto backup runs when you open the app, when you take a photo while it's open, and in the background, mostly overnight while charging.")
+                Text("Auto backup runs when you open the app, when you take a photo while it's open, and in the background, mostly overnight while charging. Searchable photos are labelled on this iPhone (\u{201C}dog\u{201D}, \u{201C}beach\u{201D}, words in receipts) and the labels are encrypted before they leave it.")
             }
 
             Section {
@@ -92,6 +102,7 @@ struct MainView: View {
             await engine.run(trigger: .auto) // e.g. right after first setup
         }
         .refreshable { engine.refreshCounts() }
+        .sheet(isPresented: $showFreeUp) { FreeUpView().environmentObject(engine) }
         .confirmationDialog("Skip everything already on this iPhone?", isPresented: $confirmSkip, titleVisibility: .visible) {
             Button("Skip \(engine.remaining) existing items") { engine.markAllExistingDone() }
         }

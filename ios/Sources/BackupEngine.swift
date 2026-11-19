@@ -31,6 +31,7 @@ final class BackupEngine: ObservableObject {
     @Published var wifiOnly: Bool { didSet { save("wifiOnly", wifiOnly) } }
     @Published var includeVideos: Bool { didSet { save("includeVideos", includeVideos); refreshCounts() } }
     @Published var pauseOnLowPower: Bool { didSet { save("pauseOnLowPower", pauseOnLowPower) } }
+    @Published var searchLabels: Bool { didSet { save("searchLabels", searchLabels) } }
     @Published var notifications: Bool {
         didSet {
             save("notifications", notifications)
@@ -43,6 +44,17 @@ final class BackupEngine: ObservableObject {
     var remaining: Int { max(0, totalCount - doneCount) }
 
     private var doneIDs: Set<String>
+
+    /// What we know about each backed-up asset: the content hashes of its files in
+    /// the chest, its size on the phone, and whether its search labels were sent.
+    /// "Free up space" only offers assets whose hashes the server still has.
+    struct LedgerEntry: Codable {
+        var h: [String]
+        var s: Int64
+        var l: Bool?
+    }
+    private var ledger: [String: LedgerEntry]
+    private static var ledgerFile: URL { doneFile.deletingLastPathComponent().appendingPathComponent("asset-ledger.json") }
     private var current: Task<Void, Never>?
     private var watcher: LibraryWatcher?
     private var pendingAuto: Task<Void, Never>?
@@ -56,7 +68,8 @@ final class BackupEngine: ObservableObject {
     private init() {
         let d = UserDefaults.standard
         d.register(defaults: ["wifiOnly": true, "autoBackup": true, "includeVideos": true,
-                              "pauseOnLowPower": true, "notifications": true])
+                              "pauseOnLowPower": true, "notifications": true, "searchLabels": true])
+        searchLabels = d.bool(forKey: "searchLabels")
         autoBackup = d.bool(forKey: "autoBackup")
         wifiOnly = d.bool(forKey: "wifiOnly")
         includeVideos = d.bool(forKey: "includeVideos")
@@ -65,6 +78,8 @@ final class BackupEngine: ObservableObject {
         uploadedBytes = (d.object(forKey: "uploadedBytes") as? NSNumber)?.int64Value ?? 0
         let data = try? Data(contentsOf: Self.doneFile)
         doneIDs = Set((data.flatMap { try? JSONDecoder().decode([String].self, from: $0) }) ?? [])
+        let ledgerData = try? Data(contentsOf: Self.ledgerFile)
+        ledger = (ledgerData.flatMap { try? JSONDecoder().decode([String: LedgerEntry].self, from: $0) }) ?? [:]
         configured = Keychain.get("secret") != nil && Keychain.get("server") != nil
     }
 
@@ -74,6 +89,9 @@ final class BackupEngine: ObservableObject {
         guard let data = try? JSONEncoder().encode(Array(doneIDs)) else { return }
         // readable in the background after first unlock, like the Keychain item
         try? data.write(to: Self.doneFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        if let l = try? JSONEncoder().encode(ledger) {
+            try? l.write(to: Self.ledgerFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
     }
 
     // MARK: setup
@@ -118,6 +136,7 @@ final class BackupEngine: ObservableObject {
 
     func resetDone() {
         doneIDs.removeAll()
+        ledger.removeAll()
         saveDone()
         refreshCounts()
     }
@@ -192,6 +211,132 @@ final class BackupEngine: ObservableObject {
             UNNotificationRequest(identifier: "sanduk-backup", content: c, trigger: nil))
     }
 
+    // MARK: indexing (after the uploads)
+
+    /// 1. Photos backed up before the ledger existed: learn their hashes (re-reads
+    ///    the file; uploads it only if the chest turns out not to have it).
+    /// 2. Make backed-up photos searchable: Vision labels, encrypted, sent in batches.
+    /// Returns a stop reason, or nil when it finished or there was nothing to do.
+    private func index(uploader: Uploader, api: SandukAPI, keys: SandukCrypto.Keys,
+                       known: inout Set<String>, deadline: Date?, ok: inout Int) async -> String? {
+        let assets = fetchAll().filter { doneIDs.contains($0.localIdentifier) }
+
+        let unchecked = assets.filter { ledger[$0.localIdentifier] == nil }
+        if !unchecked.isEmpty {
+            status = "Checking older backups"
+            passDone = 0
+            passTotal = unchecked.count
+            for asset in unchecked {
+                if Task.isCancelled { return "Paused, continues next time" }
+                if let deadline, Date() > deadline { return "Out of time, continues next time" }
+                currentAssetID = asset.localIdentifier
+                progress = 0
+                do {
+                    let (outcome, hashes, bytes) = try await uploader.backup(asset: asset, known: known) { p in
+                        Task { @MainActor in BackupEngine.shared.progress = p }
+                    }
+                    known.formUnion(hashes)
+                    if outcome == .uploaded {
+                        ok += 1
+                        uploadedBytes += bytes
+                        UserDefaults.standard.set(NSNumber(value: uploadedBytes), forKey: "uploadedBytes")
+                    }
+                    if !hashes.isEmpty { ledger[asset.localIdentifier] = LedgerEntry(h: hashes, s: bytes, l: nil) }
+                } catch {
+                    if Task.isCancelled || error is CancellationError { return "Paused, continues next time" }
+                    if error is URLError { return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
+                }
+                passDone += 1
+                if passDone % 20 == 0 { saveDone() }
+            }
+            saveDone()
+        }
+
+        guard searchLabels else { return nil }
+        let unlabeled = assets.filter { ledger[$0.localIdentifier].map { $0.l != true && !$0.h.isEmpty } ?? false }
+        guard !unlabeled.isEmpty else { return nil }
+        status = "Making photos searchable"
+        passDone = 0
+        passTotal = unlabeled.count
+        var batch: [[String: String]] = []
+        var batchIDs: [String] = []
+        func flush() async -> Bool {
+            guard !batch.isEmpty else { return true }
+            do { try await api.postLabels(batch) } catch { return false }
+            for id in batchIDs { ledger[id]?.l = true }
+            batch.removeAll()
+            batchIDs.removeAll()
+            saveDone()
+            Self.announceChestChanged()
+            return true
+        }
+        for asset in unlabeled {
+            if Task.isCancelled { _ = await flush(); return "Paused, continues next time" }
+            if let deadline, Date() > deadline { _ = await flush(); return "Out of time, continues next time" }
+            let id = asset.localIdentifier
+            currentAssetID = id
+            if let d = await Labeler.describe(asset), let hash = ledger[id]?.h.first {
+                let iv = SandukCrypto.randomIV()
+                if let ct = try? SandukCrypto.seal(Labeler.payload(d), key: keys.encKey, iv: iv) {
+                    batch.append(["hash": hash, "enc": ct.base64EncodedString(), "iv": iv.base64EncodedString()])
+                    batchIDs.append(id)
+                }
+            } else {
+                ledger[id]?.l = true // nothing Vision can read; don't retry forever
+            }
+            passDone += 1
+            progress = 1
+            if batch.count >= 40, !(await flush()) { return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
+        }
+        if !(await flush()) { return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
+        return nil
+    }
+
+    // MARK: free up space
+
+    struct FreeUpPlan {
+        let assets: [PHAsset]
+        let bytes: Int64
+        let unchecked: Int   // backed up, but not double-checked yet
+    }
+
+    /// Items on this iPhone whose every file the chest has right now. Asks the
+    /// server for its current list each time, so nothing stale is trusted.
+    func freeUpPlan(keepDays: Int, keepFavorites: Bool) async throws -> FreeUpPlan {
+        guard let server = Keychain.get("server"), let secret = Keychain.get("secret") else {
+            throw URLError(.userAuthenticationRequired)
+        }
+        let keys = try SandukCrypto.derive(secret: secret)
+        let api = SandukAPI(base: server, token: keys.authToken, session: SandukAPI.makeSession(wifiOnly: false))
+        let inChest = try await api.hashes()
+        let cutoff = keepDays > 0 ? Date().addingTimeInterval(-Double(keepDays) * 86_400) : nil
+        var out: [PHAsset] = []
+        var bytes: Int64 = 0
+        var unchecked = 0
+        for a in fetchAll() where doneIDs.contains(a.localIdentifier) {
+            guard let e = ledger[a.localIdentifier], !e.h.isEmpty else { unchecked += 1; continue }
+            guard e.h.allSatisfy(inChest.contains) else { continue }
+            if keepFavorites && a.isFavorite { continue }
+            if let cutoff, let d = a.creationDate, d > cutoff { continue }
+            out.append(a)
+            bytes += e.s
+        }
+        return FreeUpPlan(assets: out, bytes: bytes, unchecked: unchecked)
+    }
+
+    /// iOS shows its own "Delete N items?" prompt. Deleted items go to Recently Deleted.
+    func delete(_ assets: [PHAsset]) async -> Bool {
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            }
+            refreshCounts()
+            return true
+        } catch {
+            return false // you tapped Don't Allow, or Photos refused
+        }
+    }
+
     // MARK: running
 
     /// Posted when new items reached the chest, so the Chest tab can refresh.
@@ -258,6 +403,7 @@ final class BackupEngine: ObservableObject {
                     }
                     known.formUnion(hashes)
                     doneIDs.insert(asset.localIdentifier)
+                    if !hashes.isEmpty { ledger[asset.localIdentifier] = LedgerEntry(h: hashes, s: bytes, l: nil) }
                     doneCount += 1
                     passDone += 1
                     if outcome == .uploaded {
@@ -281,6 +427,10 @@ final class BackupEngine: ObservableObject {
                     failed += 1 // this one item; try the rest, and it again next run
                     passDone += 1
                 }
+            }
+            if stopReason == nil {
+                stopReason = await index(uploader: uploader, api: api, keys: keys, known: &known,
+                                         deadline: deadline, ok: &ok)
             }
         } catch {
             stopReason = error.localizedDescription
