@@ -213,83 +213,97 @@ final class BackupEngine: ObservableObject {
 
     // MARK: indexing (after the uploads)
 
-    /// 1. Photos backed up before the ledger existed: learn their hashes (re-reads
-    ///    the file; uploads it only if the chest turns out not to have it).
-    /// 2. Make backed-up photos searchable: Vision labels, encrypted, sent in batches.
+    /// 1. Make the whole chest searchable: every photo or video without labels has
+    ///    its small encrypted preview fetched, decrypted here, read by Vision, and
+    ///    the labels sent back encrypted. Works for files from any device.
+    /// 2. Photos backed up before the ledger existed: learn their hashes so "Free up
+    ///    space" can offer them. Read-only, never uploads anything.
     /// Returns a stop reason, or nil when it finished or there was nothing to do.
     private func index(uploader: Uploader, api: SandukAPI, keys: SandukCrypto.Keys,
                        known: inout Set<String>, deadline: Date?, ok: inout Int) async -> String? {
-        let assets = fetchAll().filter { doneIDs.contains($0.localIdentifier) }
+        if searchLabels, let stop = await labelChest(api: api, keys: keys, deadline: deadline) { return stop }
 
-        let unchecked = assets.filter { ledger[$0.localIdentifier] == nil }
-        if !unchecked.isEmpty {
-            status = "Checking older backups"
-            passDone = 0
-            passTotal = unchecked.count
-            for asset in unchecked {
-                if Task.isCancelled { return "Paused, continues next time" }
-                if let deadline, Date() > deadline { return "Out of time, continues next time" }
-                currentAssetID = asset.localIdentifier
-                progress = 0
-                do {
-                    let (outcome, hashes, bytes) = try await uploader.backup(asset: asset, known: known) { p in
-                        Task { @MainActor in BackupEngine.shared.progress = p }
-                    }
-                    known.formUnion(hashes)
-                    if outcome == .uploaded {
-                        ok += 1
-                        uploadedBytes += bytes
-                        UserDefaults.standard.set(NSNumber(value: uploadedBytes), forKey: "uploadedBytes")
-                    }
-                    if !hashes.isEmpty { ledger[asset.localIdentifier] = LedgerEntry(h: hashes, s: bytes, l: nil) }
-                } catch {
-                    if Task.isCancelled || error is CancellationError { return "Paused, continues next time" }
-                    if error is URLError { return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
-                }
-                passDone += 1
-                if passDone % 20 == 0 { saveDone() }
-            }
-            saveDone()
-        }
-
-        guard searchLabels else { return nil }
-        let unlabeled = assets.filter { ledger[$0.localIdentifier].map { $0.l != true && !$0.h.isEmpty } ?? false }
-        guard !unlabeled.isEmpty else { return nil }
-        status = "Making photos searchable"
+        let unchecked = fetchAll().filter { doneIDs.contains($0.localIdentifier) && ledger[$0.localIdentifier] == nil }
+        guard !unchecked.isEmpty else { return nil }
+        status = "Checking older backups"
         passDone = 0
-        passTotal = unlabeled.count
-        var batch: [[String: String]] = []
-        var batchIDs: [String] = []
-        func flush() async -> Bool {
-            guard !batch.isEmpty else { return true }
-            do { try await api.postLabels(batch) } catch { return false }
-            for id in batchIDs { ledger[id]?.l = true }
-            batch.removeAll()
-            batchIDs.removeAll()
-            saveDone()
-            Self.announceChestChanged()
-            return true
-        }
-        for asset in unlabeled {
-            if Task.isCancelled { _ = await flush(); return "Paused, continues next time" }
-            if let deadline, Date() > deadline { _ = await flush(); return "Out of time, continues next time" }
-            let id = asset.localIdentifier
-            currentAssetID = id
-            if let d = await Labeler.describe(asset), let hash = ledger[id]?.h.first {
-                let iv = SandukCrypto.randomIV()
-                if let ct = try? SandukCrypto.seal(Labeler.payload(d), key: keys.encKey, iv: iv) {
-                    batch.append(["hash": hash, "enc": ct.base64EncodedString(), "iv": iv.base64EncodedString()])
-                    batchIDs.append(id)
-                }
-            } else {
-                ledger[id]?.l = true // nothing Vision can read; don't retry forever
+        passTotal = unchecked.count
+        for asset in unchecked {
+            if Task.isCancelled { saveDone(); return "Paused, continues next time" }
+            if let deadline, Date() > deadline { saveDone(); return "Out of time, continues next time" }
+            currentAssetID = asset.localIdentifier
+            do {
+                let found = try await uploader.verify(asset: asset, known: known)
+                // not in the chest (e.g. skipped earlier): remember that, never offer it for removal
+                ledger[asset.localIdentifier] = LedgerEntry(h: found?.hashes ?? [], s: found?.bytes ?? 0, l: nil)
+            } catch {
+                if Task.isCancelled || error is CancellationError { saveDone(); return "Paused, continues next time" }
+                // couldn't read it right now (iCloud, network): try again next run
             }
             passDone += 1
             progress = 1
-            if batch.count >= 40, !(await flush()) { return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
+            if passDone % 20 == 0 { saveDone() }
         }
-        if !(await flush()) { return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
+        saveDone()
         return nil
+    }
+
+    private func labelChest(api: SandukAPI, keys: SandukCrypto.Keys, deadline: Date?) async -> String? {
+        let offline = wifiOnly ? "Waiting for Wi-Fi" : "Offline"
+        var todo: [(id: String, video: Bool)] = []
+        do {
+            var cursor: String?
+            var pages = 0
+            repeat {
+                let page = try await api.listFiles(cursor: cursor)
+                for f in page.files {
+                    guard let id = f["id"] as? String, (f["labels_enc"] as? String) == nil,
+                          (f["has_thumb"] as? NSNumber)?.intValue == 1 else { continue }
+                    todo.append((id, (f["mime"] as? String ?? "").hasPrefix("video/")))
+                }
+                cursor = page.next
+                pages += 1
+            } while cursor != nil && pages < 200
+        } catch {
+            return offline
+        }
+        guard !todo.isEmpty else { return nil }
+
+        status = "Making photos searchable"
+        currentAssetID = nil
+        passDone = 0
+        passTotal = todo.count
+        var batch: [[String: String]] = []
+        func flush() async -> Bool {
+            guard !batch.isEmpty else { return true }
+            do { try await api.postLabels(batch) } catch { return false }
+            batch.removeAll()
+            Self.announceChestChanged()
+            return true
+        }
+        for item in todo {
+            if Task.isCancelled { _ = await flush(); return "Paused, continues next time" }
+            if let deadline, Date() > deadline { _ = await flush(); return "Out of time, continues next time" }
+            var description: Labeler.Description?
+            do {
+                let t = try await api.thumb(fileId: item.id)
+                if let plain = try? SandukCrypto.open(t.ciphertext, key: keys.encKey, iv: t.iv) {
+                    description = await Labeler.describe(imageData: plain, isVideo: item.video)
+                }
+            } catch {
+                if error is URLError { _ = await flush(); return offline }
+                // no usable preview on the server: store an empty set so it isn't fetched every run
+            }
+            let d = description ?? Labeler.Description(labels: item.video ? ["video"] : [], text: "")
+            let iv = SandukCrypto.randomIV()
+            if let ct = try? SandukCrypto.seal(Labeler.payload(d), key: keys.encKey, iv: iv) {
+                batch.append(["id": item.id, "enc": ct.base64EncodedString(), "iv": iv.base64EncodedString()])
+            }
+            passDone += 1
+            progress = 1
+            if batch.count >= 25, !(await flush()) { return offline }
+        }
+        return await flush() ? nil : offline
     }
 
     // MARK: free up space
@@ -314,8 +328,8 @@ final class BackupEngine: ObservableObject {
         var bytes: Int64 = 0
         var unchecked = 0
         for a in fetchAll() where doneIDs.contains(a.localIdentifier) {
-            guard let e = ledger[a.localIdentifier], !e.h.isEmpty else { unchecked += 1; continue }
-            guard e.h.allSatisfy(inChest.contains) else { continue }
+            guard let e = ledger[a.localIdentifier] else { unchecked += 1; continue }
+            guard !e.h.isEmpty, e.h.allSatisfy(inChest.contains) else { continue }
             if keepFavorites && a.isFavorite { continue }
             if let cutoff, let d = a.creationDate, d > cutoff { continue }
             out.append(a)

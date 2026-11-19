@@ -16,6 +16,21 @@ enum Labeler {
 
     static func describe(_ asset: PHAsset) async -> Description? {
         guard let cg = await image(for: asset) else { return nil }
+        var extra: [String] = []
+        if asset.mediaSubtypes.contains(.photoScreenshot) { extra.append("screenshot") }
+        if asset.mediaSubtypes.contains(.photoPanorama) { extra.append("panorama") }
+        if asset.mediaSubtypes.contains(.photoLive) { extra.append("live photo") }
+        if asset.mediaType == .video { extra.append("video") }
+        return analyze(cg, extra: extra)
+    }
+
+    /// From a decrypted thumbnail of any file in the chest, wherever it was uploaded from.
+    static func describe(imageData: Data, isVideo: Bool) async -> Description? {
+        guard let cg = UIImage(data: imageData)?.cgImage else { return nil }
+        return analyze(cg, extra: isVideo ? ["video"] : [])
+    }
+
+    private static func analyze(_ cg: CGImage, extra: [String]) -> Description? {
 
         let classify = VNClassifyImageRequest()
         let faces = VNDetectFaceRectanglesRequest()
@@ -38,10 +53,7 @@ enum Labeler {
         let faceCount = faces.results?.count ?? 0
         if faceCount == 1 { labels += ["person", "face"] }
         if faceCount > 1 { labels += ["people", "group", "face"] }
-        if asset.mediaSubtypes.contains(.photoScreenshot) { labels.append("screenshot") }
-        if asset.mediaSubtypes.contains(.photoPanorama) { labels.append("panorama") }
-        if asset.mediaSubtypes.contains(.photoLive) { labels.append("live photo") }
-        if asset.mediaType == .video { labels.append("video") }
+        labels += extra
 
         let words = (ocr.results ?? []).compactMap { $0.topCandidates(1).first?.string }
         if words.count >= 4 { labels.append("text") }

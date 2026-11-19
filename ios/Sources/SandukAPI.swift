@@ -138,7 +138,24 @@ struct SandukAPI {
         _ = try await sendJSON("POST", "/files/\(fileId)/complete")
     }
 
-    /// Encrypted search labels, matched to files by content hash. Returns how many files got them.
+    /// One page of the chest's file list (metadata only, names stay encrypted).
+    func listFiles(cursor: String?) async throws -> (files: [[String: Any]], next: String?) {
+        var path = "/files?view=active&limit=1000"
+        if let cursor { path += "&cursor=" + Self.q(cursor) }
+        let obj = try await sendJSON("GET", path)
+        return (obj["files"] as? [[String: Any]] ?? [], obj["nextCursor"] as? String)
+    }
+
+    /// A file's small encrypted preview and its IV.
+    func thumb(fileId: String) async throws -> (iv: Data, ciphertext: Data) {
+        let (data, resp) = try await withRetry { try await send("GET", "/files/\(fileId)/thumb") }
+        guard let s = resp.value(forHTTPHeaderField: "x-iv"), let iv = Data(base64Encoded: s) else {
+            throw HTTPError(status: 502, message: "thumbnail without iv", code: nil, retryAfter: nil)
+        }
+        return (iv, data)
+    }
+
+    /// Encrypted search labels, matched to files by id (or by content hash). Returns how many files got them.
     @discardableResult
     func postLabels(_ items: [[String: String]]) async throws -> Int {
         let obj = try await sendJSON("POST", "/labels", json: ["items": items])

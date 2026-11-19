@@ -100,6 +100,17 @@ final class Uploader {
         return (.uploaded, hashes, bytes)
     }
 
+    /// Read-only: is this asset's main file already in the chest? Never uploads.
+    func verify(asset: PHAsset, known: Set<String>) async throws -> (hashes: [String], bytes: Int64)? {
+        guard let parts = Self.parts(of: asset) else { return nil }
+        let modifiedMs = Int64((asset.creationDate ?? Date()).timeIntervalSince1970 * 1000)
+        let url = try await export(parts.main.resource)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let size = try Self.size(of: url)
+        let hash = try SandukCrypto.contentHash(fileURL: url, size: size, name: parts.main.name, modifiedMs: modifiedMs)
+        return known.contains(hash) ? ([hash], size) : nil
+    }
+
     // MARK: one file
 
     private func upload(file: URL, size: Int64, part: Part, hash: String, thumb: Data?,
