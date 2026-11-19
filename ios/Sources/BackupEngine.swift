@@ -306,6 +306,19 @@ final class BackupEngine: ObservableObject {
         return await flush() ? nil : offline
     }
 
+    /// A short, readable reason for a failed item.
+    static func explain(_ error: Error, asset: PHAsset) -> String {
+        let kind = asset.mediaType == .video ? "a video" : "a photo"
+        let ns = error as NSError
+        if ns.domain == PHPhotosErrorDomain || ns.domain.contains("PHAssetResource") || ns.domain == "CloudPhotoLibraryErrorDomain" {
+            return "\(kind) couldn't be read from iCloud"
+        }
+        if let h = error as? SandukAPI.HTTPError {
+            return h.status == 413 ? "\(kind) is too big" : "the server said \(h.status) for \(kind)"
+        }
+        return "\(kind): \(error.localizedDescription)"
+    }
+
     // MARK: free up space
 
     struct FreeUpPlan {
@@ -393,6 +406,7 @@ final class BackupEngine: ObservableObject {
         }
 
         var ok = 0, skipped = 0, failed = 0
+        var failReason: String?
         var stopReason: String?
         do {
             let keys = try SandukCrypto.derive(secret: secret)
@@ -439,6 +453,7 @@ final class BackupEngine: ObservableObject {
                         stopReason = wifiOnly ? "Waiting for Wi-Fi" : "Offline"; break
                     }
                     failed += 1 // this one item; try the rest, and it again next run
+                    if failReason == nil { failReason = Self.explain(error, asset: asset) }
                     passDone += 1
                 }
             }
@@ -462,7 +477,7 @@ final class BackupEngine: ObservableObject {
         var bits: [String] = []
         if ok > 0 { bits.append("\(ok) backed up") }
         if skipped > 0 { bits.append("\(skipped) were already in the chest") }
-        if failed > 0 { bits.append("\(failed) failed, will retry") }
+        if failed > 0 { bits.append("\(failed) failed, will retry" + (failReason.map { " (\($0))" } ?? "")) }
         if let stopReason { bits.append(stopReason) }
         lastMessage = bits.isEmpty ? "Everything is backed up" : bits.joined(separator: " · ")
 
