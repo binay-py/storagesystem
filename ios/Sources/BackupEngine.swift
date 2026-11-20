@@ -639,6 +639,9 @@ final class BackupEngine: ObservableObject {
                     if Task.isCancelled || error is CancellationError {
                         stopReason = "Paused, continues next time"; break
                     }
+                    if let h = error as? SandukAPI.HTTPError, h.code == "storage_required" {
+                        stopReason = "Connect your storage first: open Sanduk on the web and follow the steps"; break
+                    }
                     if let h = error as? SandukAPI.HTTPError, h.status == 401 || h.status == 403 {
                         stopReason = "The server refused the key"; break
                     }
