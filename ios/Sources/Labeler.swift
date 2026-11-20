@@ -55,9 +55,10 @@ enum Labeler {
         if faceCount > 1 { labels += ["people", "group", "face"] }
         labels += extra
 
-        let words = (ocr.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-        if words.count >= 4 { labels.append("text") }
-        var text = words.joined(separator: " ")
+        let lines = (ocr.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        var text = lines.joined(separator: " ")
+        // Vision returns lines, not words: count the words
+        if text.split(whereSeparator: \.isWhitespace).count >= 4 { labels.append("text") }
         if text.count > 600 { text = String(text.prefix(600)) }
 
         var unique: [String] = []
