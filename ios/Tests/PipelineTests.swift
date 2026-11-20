@@ -28,7 +28,9 @@ final class PipelineTests: XCTestCase {
         keys = try SandukCrypto.derive(secret: secret)
         api = SandukAPI(base: Self.server, token: keys.authToken, session: .shared)
         uploader = Uploader(api: api, key: keys.encKey)
-        try await api.send("POST", "/hello")
+        // the server's invite code (CI secret), so this test account may store files
+        let invite = ProcessInfo.processInfo.environment["SANDUK_TEST_INVITE"] ?? ""
+        try await api.send("POST", "/hello", headers: invite.isEmpty ? [:] : ["x-invite": invite])
     }
 
     override func tearDown() async throws {

@@ -36,6 +36,9 @@ jobs:
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
       - name: Build and run tests (no signing)
+        env:
+          # the server's invite code, so test accounts may store files (TEST_RUNNER_ reaches the tests)
+          TEST_RUNNER_SANDUK_TEST_INVITE: ${{ secrets.SANDUK_TEST_INVITE }}
         run: |
           set -o pipefail
           xcodebuild test \
