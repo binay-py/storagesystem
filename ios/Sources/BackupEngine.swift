@@ -354,6 +354,11 @@ final class BackupEngine: ObservableObject {
         }
     }
 
+    /// Keeps the given order (newest first) but moves long items to the back.
+    nonisolated static func backupOrder<T>(_ items: [T], isLong: (T) -> Bool) -> [T] {
+        items.filter { !isLong($0) } + items.filter(isLong)
+    }
+
     /// A short, readable reason for a failed item.
     static func explain(_ error: Error, asset: PHAsset) -> String {
         let kind = asset.mediaType == .video ? "a video" : "a photo"
@@ -467,14 +472,9 @@ final class BackupEngine: ObservableObject {
             let queue = BackgroundUploads.shared
             // newest first, but long videos (often gigabytes) wait at the back so
             // they never hold up your photos
-            let pending = fetchAll()
-                .filter { !doneIDs.contains($0.localIdentifier) && !queue.isQueued($0.localIdentifier) }
-                .enumerated()
-                .sorted { a, b in
-                    let la = a.element.duration > 180, lb = b.element.duration > 180
-                    return la == lb ? a.offset < b.offset : !la
-                }
-                .map(\.element)
+            let pending = Self.backupOrder(
+                fetchAll().filter { !doneIDs.contains($0.localIdentifier) && !queue.isQueued($0.localIdentifier) },
+                isLong: { $0.duration > 180 })
             passTotal = pending.count
 
             for asset in pending {

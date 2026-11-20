@@ -141,8 +141,8 @@ final class Uploader {
         let takenAt = asset.creationDate.map { Int64($0.timeIntervalSince1970 * 1000) }
         var chunks: [BackgroundUploads.Chunk] = []
         do {
-            let photo = try await stage(file: mainURL, size: mainSize, part: main, hash: mainHash,
-                                        thumb: thumb, takenAt: takenAt)
+            let photo = try await stage(file: mainURL, size: mainSize, name: main.name, mime: main.mime,
+                                        hash: mainHash, thumb: thumb, takenAt: takenAt)
             chunks += photo.chunks
             var hashes = [mainHash]
             var bytes = mainSize
@@ -152,8 +152,8 @@ final class Uploader {
                 let vSize = try Self.size(of: vURL)
                 let vHash = try SandukCrypto.contentHash(fileURL: vURL, size: vSize,
                                                          name: paired.name, modifiedMs: modifiedMs)
-                let video = try await stage(file: vURL, size: vSize, part: paired, hash: vHash,
-                                            thumb: nil, takenAt: takenAt)
+                let video = try await stage(file: vURL, size: vSize, name: paired.name, mime: paired.mime,
+                                            hash: vHash, thumb: nil, takenAt: takenAt)
                 chunks += video.chunks
                 try await api.pairLive(photoId: photo.id, videoId: video.id)
                 hashes.append(vHash)
@@ -169,9 +169,11 @@ final class Uploader {
         }
     }
 
-    private func stage(file: URL, size: Int64, part: Part, hash: String, thumb: Data?,
-                       takenAt: Int64?) async throws -> (id: String, chunks: [BackgroundUploads.Chunk]) {
-        let (fileId, chunkCount, already) = try await begin(size: size, part: part, hash: hash,
+    /// Creates (or resumes) the file on the server and encrypts the missing chunks to disk.
+    /// Internal, not private, so the tests can run it against a real server.
+    func stage(file: URL, size: Int64, name: String, mime: String, hash: String, thumb: Data?,
+               takenAt: Int64?) async throws -> (id: String, chunks: [BackgroundUploads.Chunk]) {
+        let (fileId, chunkCount, already) = try await begin(size: size, name: name, mime: mime, hash: hash,
                                                             thumb: thumb, takenAt: takenAt)
         if let thumb {
             let tIv = SandukCrypto.randomIV()
@@ -206,14 +208,14 @@ final class Uploader {
     }
 
     /// Create the file row, or find an interrupted upload of the same file.
-    private func begin(size: Int64, part: Part, hash: String, thumb: Data?,
-                       takenAt: Int64?) async throws -> (id: String, chunkCount: Int, already: Set<Int>) {
+    func begin(size: Int64, name: String, mime: String, hash: String, thumb: Data?,
+               takenAt: Int64?) async throws -> (id: String, chunkCount: Int, already: Set<Int>) {
         let chunkCount = max(1, Int((size + Int64(Self.chunkSize) - 1) / Int64(Self.chunkSize)))
         if let found = try? await api.resume(hash: hash, size: size, chunks: chunkCount) {
             return (found.id, chunkCount, found.done)
         }
         let nameIv = SandukCrypto.randomIV()
-        let nameEnc = try SandukCrypto.seal(Data(part.name.utf8), key: key, iv: nameIv).base64EncodedString()
+        let nameEnc = try SandukCrypto.seal(Data(name.utf8), key: key, iv: nameIv).base64EncodedString()
         var blurEnc: String?, blurIv: String?
         if let thumb, let blur = Self.blur(from: thumb) {
             let iv = SandukCrypto.randomIV()
@@ -221,7 +223,7 @@ final class Uploader {
             blurIv = blurEnc == nil ? nil : iv.base64EncodedString()
         }
         let id = try await api.createFile(nameEnc: nameEnc, nameIv: nameIv.base64EncodedString(),
-                                          mime: part.mime, size: size, chunkCount: chunkCount,
+                                          mime: mime, size: size, chunkCount: chunkCount,
                                           contentHash: hash, takenAt: takenAt,
                                           blurEnc: blurEnc, blurIv: blurIv)
         return (id, chunkCount, [])

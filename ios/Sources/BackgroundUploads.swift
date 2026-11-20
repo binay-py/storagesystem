@@ -93,16 +93,25 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate {
         dir.appendingPathComponent("\(fileId).\(idx).bin")
     }
 
+    /// The PUT for one chunk (the server finishes the file when the last one lands).
+    static func chunkRequest(server: String, token: String, fileId: String, idx: Int,
+                             iv: String, sha: String) -> URLRequest? {
+        guard let url = URL(string: "\(server)/api/files/\(fileId)/chunks/\(idx)?iv=\(SandukAPI.q(iv))&auto=1")
+        else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer " + token, forHTTPHeaderField: "authorization")
+        req.setValue(sha, forHTTPHeaderField: "x-chunk-sha256")
+        req.setValue("application/octet-stream", forHTTPHeaderField: "content-type")
+        return req
+    }
+
     private func start(assetID: String, fileId: String, idx: Int, iv: String, sha: String) {
         guard let server = Keychain.get("server"), let secret = Keychain.get("secret"),
               let keys = try? SandukCrypto.derive(secret: secret),
-              let url = URL(string: "\(server)/api/files/\(fileId)/chunks/\(idx)?iv=\(SandukAPI.q(iv))&auto=1")
+              let req = Self.chunkRequest(server: server, token: keys.authToken, fileId: fileId,
+                                          idx: idx, iv: iv, sha: sha)
         else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "PUT"
-        req.setValue("Bearer " + keys.authToken, forHTTPHeaderField: "authorization")
-        req.setValue(sha, forHTTPHeaderField: "x-chunk-sha256")
-        req.setValue("application/octet-stream", forHTTPHeaderField: "content-type")
         let task = session.uploadTask(with: req, fromFile: Self.chunkFile(fileId, idx))
         task.taskDescription = [assetID, fileId, String(idx), iv, sha].joined(separator: "\n")
         task.resume()
