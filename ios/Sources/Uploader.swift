@@ -8,6 +8,13 @@ import Photos
 import UIKit
 import UniformTypeIdentifiers
 
+struct NotEnoughSpace: LocalizedError {
+    let needed: Int64
+    var errorDescription: String? {
+        "needs \(ByteCountFormatter.string(fromByteCount: needed + 1_000_000_000, countStyle: .file)) free on this iPhone"
+    }
+}
+
 final class Uploader {
     static let chunkSize = 18 * 1024 * 1024 // under Telegram's 20 MB download cap
 
@@ -171,6 +178,13 @@ final class Uploader {
             if let tCt = try? SandukCrypto.seal(thumb, key: key, iv: tIv) {
                 try? await api.putThumb(fileId: fileId, iv: tIv, ciphertext: tCt)
             }
+        }
+        // encrypted copies of the remaining chunks go on disk until iOS sends them
+        let needed = Int64(chunkCount - already.count) * Int64(Self.chunkSize)
+        let free = (try? BackgroundUploads.dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage ?? .max
+        if free < needed + 1_000_000_000 {
+            throw NotEnoughSpace(needed: needed)
         }
         let h = try FileHandle(forReadingFrom: file)
         defer { try? h.close() }

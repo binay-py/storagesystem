@@ -465,7 +465,16 @@ final class BackupEngine: ObservableObject {
             status = "Checking your chest…"
             var known = try await api.hashes()
             let queue = BackgroundUploads.shared
-            let pending = fetchAll().filter { !doneIDs.contains($0.localIdentifier) && !queue.isQueued($0.localIdentifier) }
+            // newest first, but long videos (often gigabytes) wait at the back so
+            // they never hold up your photos
+            let pending = fetchAll()
+                .filter { !doneIDs.contains($0.localIdentifier) && !queue.isQueued($0.localIdentifier) }
+                .enumerated()
+                .sorted { a, b in
+                    let la = a.element.duration > 180, lb = b.element.duration > 180
+                    return la == lb ? a.offset < b.offset : !la
+                }
+                .map(\.element)
             passTotal = pending.count
 
             for asset in pending {
