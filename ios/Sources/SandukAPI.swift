@@ -162,12 +162,24 @@ struct SandukAPI {
 
     /// The finished file with this content hash, if the chest has one.
     func lookup(hash: String) async throws -> String? {
+        try await lookupFile(hash: hash)?.id
+    }
+
+    /// The finished file with this content hash, and its streaming copy if it has one.
+    func lookupFile(hash: String) async throws -> (id: String, previewId: String?)? {
         do {
             let obj = try await sendJSON("GET", "/files/lookup?hash=\(Self.q(hash))")
-            return obj["id"] as? String
+            guard let id = obj["id"] as? String else { return nil }
+            return (id, obj["preview_id"] as? String)
         } catch let e as HTTPError where e.status == 404 {
             return nil
         }
+    }
+
+    /// Marks a file as the smaller streaming copy of a video; the server links
+    /// it to the original once it has fully arrived.
+    func markStreamingCopy(_ copyId: String, of originalId: String) async throws {
+        _ = try await sendJSON("POST", "/files/\(copyId)/preview-of", json: ["originalId": originalId])
     }
 
     func pairLive(photoId: String, videoId: String) async throws {

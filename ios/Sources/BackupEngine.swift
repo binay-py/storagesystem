@@ -2,6 +2,7 @@
 // Photos assets are done. Shared by the app screen, background tasks, the
 // Photos library watcher and the Shortcuts action.
 
+import AVFoundation
 import Foundation
 import Photos
 import UIKit
@@ -55,6 +56,7 @@ final class BackupEngine: ObservableObject {
         var s: Int64
         var l: Bool?
         var m: Double? // the photo's modificationDate when it was backed up
+        var p: Bool?   // a big video's streaming copy is in the chest (or not needed)
     }
     private func entry(_ asset: PHAsset?, _ hashes: [String], _ bytes: Int64) -> LedgerEntry {
         LedgerEntry(h: hashes, s: bytes, l: nil, m: asset?.modificationDate?.timeIntervalSince1970)
@@ -230,6 +232,9 @@ final class BackupEngine: ObservableObject {
     private func index(uploader: Uploader, api: SandukAPI, keys: SandukCrypto.Keys,
                        known: inout Set<String>, deadline: Date?, ok: inout Int) async -> String? {
         if searchLabels, let stop = await labelChest(api: api, keys: keys, deadline: deadline) { return stop }
+        if heavyWorkAllowed, let stop = await makeStreamingCopies(api: api, keys: keys, uploader: uploader, deadline: deadline) {
+            return stop
+        }
         return nil
     }
 
@@ -342,7 +347,11 @@ final class BackupEngine: ObservableObject {
     /// app was in the background or had been relaunched just for this.
     func backgroundItemFinished(assetID: String, hashes: [String], bytes: Int64, ok: Bool) {
         backgroundQueued = BackgroundUploads.shared.count
-        if ok {
+        if assetID.hasPrefix("copy:") {
+            // a streaming copy, not a photo of yours
+            let original = String(assetID.dropFirst(5))
+            if ok { ledger[original]?.p = true }
+        } else if ok {
             doneIDs.insert(assetID)
             if !hashes.isEmpty {
                 let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil).firstObject
@@ -467,6 +476,93 @@ final class BackupEngine: ObservableObject {
         current = nil
     }
 
+    /// Converting video is heavy: only while charging, or when you tap Back up now.
+    private var heavyWorkAllowed = false
+
+    // MARK: streaming copies
+
+    /// Big videos (high bit rate, e.g. 4K) stutter when streamed straight from
+    /// the chest. Each gets a 720p H.264 copy for smooth playback in the app and
+    /// on the web (H.264 also plays on Windows and Android); Save and Download
+    /// still give the untouched original. Encrypted like everything else.
+    private func makeStreamingCopies(api: SandukAPI, keys: SandukCrypto.Keys, uploader: Uploader,
+                                     deadline: Date?) async -> String? {
+        let queue = BackgroundUploads.shared
+        let videos = fetchAll().filter { a in
+            guard a.mediaType == .video, doneIDs.contains(a.localIdentifier),
+                  let e = ledger[a.localIdentifier], !e.h.isEmpty, e.p != true else { return false }
+            return !queue.isQueued("copy:" + a.localIdentifier)
+        }
+        guard !videos.isEmpty else { return nil }
+        status = "Making videos play smoothly"
+        passDone = 0
+        passTotal = videos.count
+        for asset in videos {
+            if Task.isCancelled { saveDone(); return "Paused, continues next time" }
+            if let deadline, Date() > deadline { saveDone(); return "Out of time, continues next time" }
+            let id = asset.localIdentifier
+            passDone += 1
+            guard let e = ledger[id], let hash = e.h.first else { continue }
+            // small or low-bit-rate videos already stream smoothly
+            let bytesPerSecond = asset.duration > 0 ? Double(e.s) / asset.duration : 0
+            if e.s < 40_000_000 || bytesPerSecond < 1_500_000 { ledger[id]?.p = true; continue }
+            do {
+                guard let original = try await api.lookupFile(hash: hash) else { continue }
+                if original.previewId != nil { ledger[id]?.p = true; continue }
+                currentAssetID = id
+                progress = 0
+                let url = try await Self.exportStreamingCopy(asset)
+                defer { try? FileManager.default.removeItem(at: url) }
+                let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+                let staged = try await uploader.stage(file: url, size: size, name: "streaming-copy.mp4", mime: "video/mp4",
+                                                      hash: "copy:" + hash, thumb: nil, takenAt: nil)
+                try await api.markStreamingCopy(staged.id, of: original.id)
+                if staged.chunks.isEmpty {
+                    ledger[id]?.p = true
+                } else {
+                    queue.enqueue(assetID: "copy:" + id, hashes: [], bytes: 0, chunks: staged.chunks)
+                    backgroundQueued = queue.count
+                }
+                saveDone()
+            } catch {
+                if Task.isCancelled || error is CancellationError { saveDone(); return "Paused, continues next time" }
+                if error is URLError { saveDone(); return wifiOnly ? "Waiting for Wi-Fi" : "Offline" }
+                // this one didn't work (e.g. not on the phone any more): try again another time
+            }
+        }
+        saveDone()
+        return nil
+    }
+
+    static func exportStreamingCopy(_ asset: PHAsset) async throws -> URL {
+        let opts = PHVideoRequestOptions()
+        opts.isNetworkAccessAllowed = true
+        opts.deliveryMode = .highQualityFormat
+        opts.version = .current
+        let session: AVAssetExportSession = try await withCheckedThrowingContinuation { c in
+            PHImageManager.default().requestExportSession(forVideo: asset, options: opts,
+                                                          exportPreset: AVAssetExportPreset1280x720) { s, info in
+                if let s { c.resume(returning: s) }
+                else { c.resume(throwing: (info?[PHImageErrorKey] as? Error) ?? CocoaError(.fileReadUnknown)) }
+            }
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        session.outputURL = url
+        session.outputFileType = .mp4
+        session.shouldOptimizeForNetworkUse = true // index first: playback starts right away
+        await withTaskCancellationHandler {
+            await session.export()
+        } onCancel: {
+            session.cancelExport()
+        }
+        guard session.status == .completed else {
+            try? FileManager.default.removeItem(at: url)
+            if session.status == .cancelled { throw CancellationError() }
+            throw session.error ?? CocoaError(.fileWriteUnknown)
+        }
+        return url
+    }
+
     private func pass(trigger: Trigger, deadline: Date?) async {
         guard let server = Keychain.get("server"), let secret = Keychain.get("secret") else {
             lastMessage = "Not set up"; return
@@ -477,6 +573,9 @@ final class BackupEngine: ObservableObject {
         progress = 0
         passDone = 0
         passTotal = 0
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let charging = [.charging, .full].contains(UIDevice.current.batteryState)
+        heavyWorkAllowed = charging || trigger == .manual
         // a little extra time if the app is closed mid-upload
         let bg = BackgroundTime()
         bg.id = UIApplication.shared.beginBackgroundTask(withName: "sanduk-backup") {

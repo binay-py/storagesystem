@@ -189,6 +189,30 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(found, staged.id)
     }
 
+    func testStreamingCopyIsLinkedWhenFinished() async throws {
+        let (bigURL, _) = try makeFile(bytes: 9_000)
+        let (smallURL, _) = try makeFile(bytes: 2_000)
+        let hash = "sha256:video-\(UUID().uuidString)"
+        let original = try await uploader.stage(file: bigURL, size: 9_000, name: "IMG_4K.MOV", mime: "video/quicktime",
+                                                hash: hash, thumb: nil, takenAt: nil)
+        created.append(original.id)
+        temp += original.chunks.map(\.file)
+        _ = try await put(original.chunks[0])
+
+        let copy = try await uploader.stage(file: smallURL, size: 2_000, name: "streaming-copy.mp4", mime: "video/mp4",
+                                            hash: "copy:" + hash, thumb: nil, takenAt: nil)
+        temp += copy.chunks.map(\.file)
+        try await api.markStreamingCopy(copy.id, of: original.id)
+        let before = try await api.lookupFile(hash: hash)
+        XCTAssertEqual(before?.id, original.id)
+        XCTAssertNil(before?.previewId, "linked before the copy arrived")
+        _ = try await put(copy.chunks[0])
+        let after = try await api.lookupFile(hash: hash)
+        XCTAssertEqual(after?.previewId, copy.id)
+        let listedCopy = try await listed(copy.id)
+        XCTAssertFalse(listedCopy, "the copy must not show in the library")
+    }
+
     // MARK: on-device pieces
 
     func testLabelerReadsTextInAPhoto() async throws {
