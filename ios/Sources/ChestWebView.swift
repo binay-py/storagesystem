@@ -22,6 +22,12 @@ struct ChestWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        // service workers (video streaming) run only for app-bound domains;
+        // limit navigation to them only when this server is one of them
+        let bound = Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String] ?? []
+        if let host = URL(string: server)?.host, bound.contains(host) {
+            config.limitsNavigationsToAppBoundDomains = true
+        }
         config.websiteDataStore = .default()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
