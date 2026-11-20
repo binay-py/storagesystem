@@ -8,6 +8,9 @@ import Photos
 import UIKit
 import UniformTypeIdentifiers
 
+/// Holds a PhotoKit request id so a cancelled task can stop the download.
+final class RequestID: @unchecked Sendable { var id: PHAssetResourceDataRequestID = 0 }
+
 struct NotEnoughSpace: LocalizedError {
     let needed: Int64
     var errorDescription: String? {
@@ -107,15 +110,23 @@ final class Uploader {
         return (.uploaded, hashes, bytes)
     }
 
-    /// Read-only: is this asset's main file already in the chest? Never uploads.
+    /// Read-only: is this asset already in the chest (for a live photo: both the
+    /// photo and its video)? Never uploads.
     func verify(asset: PHAsset, known: Set<String>) async throws -> (hashes: [String], bytes: Int64)? {
         guard let parts = Self.parts(of: asset) else { return nil }
         let modifiedMs = Int64((asset.creationDate ?? Date()).timeIntervalSince1970 * 1000)
-        let url = try await export(parts.main.resource)
-        defer { try? FileManager.default.removeItem(at: url) }
-        let size = try Self.size(of: url)
-        let hash = try SandukCrypto.contentHash(fileURL: url, size: size, name: parts.main.name, modifiedMs: modifiedMs)
-        return known.contains(hash) ? ([hash], size) : nil
+        var hashes: [String] = []
+        var bytes: Int64 = 0
+        for part in [parts.main] + (parts.paired.map { [$0] } ?? []) {
+            let url = try await export(part.resource)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let size = try Self.size(of: url)
+            let hash = try SandukCrypto.contentHash(fileURL: url, size: size, name: part.name, modifiedMs: modifiedMs)
+            guard known.contains(hash) else { return nil }
+            hashes.append(hash)
+            bytes += size
+        }
+        return (hashes, bytes)
     }
 
     // MARK: background variant
@@ -123,7 +134,7 @@ final class Uploader {
     /// Like backup(), but the chunks are encrypted into files and handed to
     /// BackgroundUploads, which iOS uploads even after you leave the app. The file
     /// rows, thumbnail and live-photo pairing are done right away (small requests).
-    /// Returns the chunks still to send; empty when the chest already had it all.
+    /// A live photo only counts as already in the chest when its video is there too.
     func prepare(asset: PHAsset, known: Set<String>) async throws
         -> (outcome: Outcome, hashes: [String], bytes: Int64, chunks: [BackgroundUploads.Chunk]) {
         guard let parts = Self.parts(of: asset) else { return (.nothingToUpload, [], 0, []) }
@@ -135,36 +146,54 @@ final class Uploader {
         let mainSize = try Self.size(of: mainURL)
         let mainHash = try SandukCrypto.contentHash(fileURL: mainURL, size: mainSize,
                                                     name: main.name, modifiedMs: modifiedMs)
-        if known.contains(mainHash) { return (.alreadyInChest, [mainHash], mainSize, []) }
 
-        let thumb = await thumbnail(for: asset)
+        var video: (url: URL, size: Int64, hash: String)?
+        defer { if let video { try? FileManager.default.removeItem(at: video.url) } }
+        if let paired {
+            let vURL = try await export(paired.resource)
+            let vSize = try Self.size(of: vURL)
+            let vHash = try SandukCrypto.contentHash(fileURL: vURL, size: vSize,
+                                                     name: paired.name, modifiedMs: modifiedMs)
+            video = (vURL, vSize, vHash)
+        }
+        let mainKnown = known.contains(mainHash)
+        let videoKnown = video.map { known.contains($0.hash) } ?? true
+        let hashes = [mainHash] + (video.map { [$0.hash] } ?? [])
+        let bytes = mainSize + (video?.size ?? 0)
+        if mainKnown && videoKnown { return (.alreadyInChest, hashes, bytes, []) }
+
         let takenAt = asset.creationDate.map { Int64($0.timeIntervalSince1970 * 1000) }
         var chunks: [BackgroundUploads.Chunk] = []
         do {
-            let photo = try await stage(file: mainURL, size: mainSize, name: main.name, mime: main.mime,
-                                        hash: mainHash, thumb: thumb, takenAt: takenAt)
-            chunks += photo.chunks
-            var hashes = [mainHash]
-            var bytes = mainSize
-            if let paired {
-                let vURL = try await export(paired.resource)
-                defer { try? FileManager.default.removeItem(at: vURL) }
-                let vSize = try Self.size(of: vURL)
-                let vHash = try SandukCrypto.contentHash(fileURL: vURL, size: vSize,
-                                                         name: paired.name, modifiedMs: modifiedMs)
-                let video = try await stage(file: vURL, size: vSize, name: paired.name, mime: paired.mime,
-                                            hash: vHash, thumb: nil, takenAt: takenAt)
-                chunks += video.chunks
-                try await api.pairLive(photoId: photo.id, videoId: video.id)
-                hashes.append(vHash)
-                bytes += vSize
+            let photoId: String
+            if mainKnown {
+                // the photo made it earlier but its video didn't: add the video to it
+                guard let id = try await api.lookup(hash: mainHash) else {
+                    throw SandukAPI.HTTPError(status: 404, message: "photo not found", code: nil, retryAfter: nil)
+                }
+                photoId = id
+            } else {
+                let thumb = await thumbnail(for: asset)
+                let photo = try await stage(file: mainURL, size: mainSize, name: main.name, mime: main.mime,
+                                            hash: mainHash, thumb: thumb, takenAt: takenAt)
+                photoId = photo.id
+                chunks += photo.chunks
+            }
+            if let video, let paired {
+                let videoId: String
+                if videoKnown, let id = try await api.lookup(hash: video.hash) {
+                    videoId = id
+                } else {
+                    let v = try await stage(file: video.url, size: video.size, name: paired.name, mime: paired.mime,
+                                            hash: video.hash, thumb: nil, takenAt: takenAt)
+                    videoId = v.id
+                    chunks += v.chunks
+                }
+                try await api.pairLive(photoId: photoId, videoId: videoId)
             }
             return (chunks.isEmpty ? .uploaded : .queued, hashes, bytes, chunks)
         } catch {
-            for c in chunks {
-                try? FileManager.default.removeItem(at: c.file)
-                try? FileManager.default.removeItem(at: c.file.appendingPathExtension("json"))
-            }
+            for c in chunks { try? FileManager.default.removeItem(at: c.file) }
             throw error
         }
     }
@@ -197,11 +226,14 @@ final class Uploader {
             let plain = try h.read(upToCount: Self.chunkSize) ?? Data()
             let iv = SandukCrypto.randomIV()
             let ct = try SandukCrypto.seal(plain, key: key, iv: iv)
-            let url = BackgroundUploads.dir.appendingPathComponent("\(fileId).\(i).bin")
-            try ct.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            let c = BackgroundUploads.Chunk(fileId: fileId, idx: i, iv: iv, file: url, sha: SandukCrypto.sha256Hex(ct))
-            BackgroundUploads.shared.writeMeta(c)
-            out.append(c)
+            let url = BackgroundUploads.newChunkFile(fileId: fileId, idx: i)
+            do {
+                try ct.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            } catch {
+                for c in out { try? FileManager.default.removeItem(at: c.file) }
+                throw error
+            }
+            out.append(BackgroundUploads.Chunk(fileId: fileId, idx: i, iv: iv, file: url, sha: SandukCrypto.sha256Hex(ct)))
         }
         if out.isEmpty { try await api.complete(fileId: fileId) } // every chunk was already there
         return (fileId, out)
@@ -292,10 +324,29 @@ final class Uploader {
             .appendingPathExtension((r.originalFilename as NSString).pathExtension)
         let opts = PHAssetResourceRequestOptions()
         opts.isNetworkAccessAllowed = true // originals may be in iCloud ("Optimize Storage")
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            PHAssetResourceManager.default().writeData(for: r, toFile: url, options: opts) { err in
-                if let err { c.resume(throwing: err) } else { c.resume() }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        let request = RequestID()
+        do {
+            try Task.checkCancellation()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                    var writeError: Error?
+                    request.id = PHAssetResourceManager.default().requestData(for: r, options: opts, dataReceivedHandler: { data in
+                        guard writeError == nil else { return }
+                        do { try handle.write(contentsOf: data) } catch { writeError = error }
+                    }, completionHandler: { err in
+                        if let e = err ?? writeError { c.resume(throwing: e) } else { c.resume() }
+                    })
+                }
+            } onCancel: {
+                PHAssetResourceManager.default().cancelDataRequest(request.id)
             }
+            try handle.close()
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: url)
+            throw error
         }
         return url
     }

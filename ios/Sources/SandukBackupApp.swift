@@ -37,6 +37,13 @@ struct SandukBackupApp: App {
 ///  - processing: long (minutes), usually overnight while charging on Wi-Fi. Does the bulk.
 ///  - app refresh: ~30 s, a few times a day. Enough for a handful of new photos.
 /// iOS decides when they run, based on how often you open the app and battery.
+/// True exactly once, from any thread.
+final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if used { return false }; used = true; return true }
+}
+
 enum BackgroundJobs {
     static var processingID: String { (Bundle.main.bundleIdentifier ?? "sanduk") + ".backup" }
     static var refreshID: String { (Bundle.main.bundleIdentifier ?? "sanduk") + ".refresh" }
@@ -64,12 +71,16 @@ enum BackgroundJobs {
 
     private static func handle(_ task: BGTask, deadline: Date?) {
         schedule() // queue the next one first
+        let done = Once()
         task.expirationHandler = {
+            // out of time: stop and report right away, or iOS kills the app and
+            // schedules it less often
             Task { @MainActor in BackupEngine.shared.cancel() }
+            if done.claim() { task.setTaskCompleted(success: false) }
         }
         Task { @MainActor in
             await BackupEngine.shared.run(trigger: .background, deadline: deadline)
-            task.setTaskCompleted(success: true)
+            if done.claim() { task.setTaskCompleted(success: true) }
         }
     }
 }

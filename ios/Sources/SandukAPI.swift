@@ -97,10 +97,8 @@ struct SandukAPI {
     }
 
     func resume(hash: String, size: Int64, chunks: Int) async throws -> (id: String, done: Set<Int>)? {
-        var q = URLComponents()
-        q.queryItems = [.init(name: "hash", value: hash), .init(name: "size", value: String(size)),
-                        .init(name: "chunks", value: String(chunks))]
-        let obj = try await sendJSON("GET", "/files/resume?" + (q.percentEncodedQuery ?? ""))
+        // q() encodes "+" too, which URLComponents leaves as is (and the server reads as a space)
+        let obj = try await sendJSON("GET", "/files/resume?hash=\(Self.q(hash))&size=\(size)&chunks=\(chunks)")
         guard let id = obj["id"] as? String else { return nil }
         let done = (obj["done"] as? [NSNumber] ?? []).map(\.intValue)
         return (id, Set(done))
@@ -160,6 +158,16 @@ struct SandukAPI {
     func postLabels(_ items: [[String: String]]) async throws -> Int {
         let obj = try await sendJSON("POST", "/labels", json: ["items": items])
         return (obj["updated"] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// The finished file with this content hash, if the chest has one.
+    func lookup(hash: String) async throws -> String? {
+        do {
+            let obj = try await sendJSON("GET", "/files/lookup?hash=\(Self.q(hash))")
+            return obj["id"] as? String
+        } catch let e as HTTPError where e.status == 404 {
+            return nil
+        }
     }
 
     func pairLive(photoId: String, videoId: String) async throws {

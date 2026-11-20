@@ -98,7 +98,6 @@ final class PipelineTests: XCTestCase {
             let plain = try SandukCrypto.open(ct, key: keys.encKey, iv: c.iv)
             let start = c.idx * Uploader.chunkSize
             XCTAssertEqual(plain, original.subdata(in: start..<min(start + Uploader.chunkSize, size)))
-            XCTAssertTrue(FileManager.default.fileExists(atPath: c.file.appendingPathExtension("json").path))
         }
 
         // not visible until finished; the server finishes it on the last piece
@@ -127,12 +126,14 @@ final class PipelineTests: XCTestCase {
         temp += first.chunks.map(\.file)
         _ = try await put(first.chunks[0]) // the app is killed after one piece
 
-        // next run: same file, same id, only the missing piece
+        // next run: same file, same id, only the missing piece, in a new file of its own
+        // (so an old task can never send these bytes with another IV)
         let again = try await uploader.stage(file: url, size: Int64(size), name: "RESUME.MOV", mime: "video/quicktime",
                                              hash: hash, thumb: nil, takenAt: nil)
         temp += again.chunks.map(\.file)
         XCTAssertEqual(again.id, first.id, "started a new upload instead of resuming")
         XCTAssertEqual(again.chunks.map(\.idx), [1])
+        XCTAssertNotEqual(again.chunks[0].file, first.chunks[1].file)
         let r = try await put(again.chunks[0])
         XCTAssertEqual(r["complete"] as? Bool, true)
         let back = try await download(first.id)
@@ -164,6 +165,28 @@ final class PipelineTests: XCTestCase {
         let obj = try JSONSerialization.jsonObject(with: SandukCrypto.open(enc, key: keys.encKey, iv: liv)) as? [String: Any]
         XCTAssertEqual(obj?["l"] as? [String], ["cat", "animal"]) // the shape the web app reads
         XCTAssertEqual(obj?["v"] as? Int, 1)
+    }
+
+    func testDamagedPieceIsRefusedAndLookupFindsFinishedFile() async throws {
+        let (url, _) = try makeFile(bytes: 5_000)
+        let hash = "sha256:lookup-\(UUID().uuidString)"
+        let staged = try await uploader.stage(file: url, size: 5_000, name: "A.JPG", mime: "image/jpeg",
+                                              hash: hash, thumb: nil, takenAt: nil)
+        created.append(staged.id)
+        temp += staged.chunks.map(\.file)
+        let c = staged.chunks[0]
+        // wrong checksum: refused, file stays unfinished
+        var bad = try XCTUnwrap(BackgroundUploads.chunkRequest(server: Self.server, token: keys.authToken, fileId: c.fileId,
+                                                               idx: c.idx, iv: c.iv.base64EncodedString(), sha: String(repeating: "0", count: 64)))
+        bad.httpMethod = "PUT"
+        let (_, resp) = try await URLSession.shared.upload(for: bad, fromFile: c.file)
+        XCTAssertEqual((resp as? HTTPURLResponse)?.statusCode, 400)
+        let missing = try await api.lookup(hash: hash)
+        XCTAssertNil(missing)
+        // right checksum: finished, and lookup by hash finds it (used to pair a live photo's video)
+        _ = try await put(c)
+        let found = try await api.lookup(hash: hash)
+        XCTAssertEqual(found, staged.id)
     }
 
     // MARK: on-device pieces

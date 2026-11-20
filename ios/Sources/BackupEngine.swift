@@ -54,6 +54,10 @@ final class BackupEngine: ObservableObject {
         var h: [String]
         var s: Int64
         var l: Bool?
+        var m: Double? // the photo's modificationDate when it was backed up
+    }
+    private func entry(_ asset: PHAsset?, _ hashes: [String], _ bytes: Int64) -> LedgerEntry {
+        LedgerEntry(h: hashes, s: bytes, l: nil, m: asset?.modificationDate?.timeIntervalSince1970)
     }
     private var ledger: [String: LedgerEntry]
     private static var ledgerFile: URL { doneFile.deletingLastPathComponent().appendingPathComponent("asset-ledger.json") }
@@ -123,6 +127,8 @@ final class BackupEngine: ObservableObject {
 
     func forget() {
         cancel()
+        BackgroundUploads.shared.reset()
+        backgroundQueued = 0
         Keychain.delete("secret")
         Keychain.delete("server")
         ChestWebView.clearWebData()
@@ -251,7 +257,7 @@ final class BackupEngine: ObservableObject {
                 do {
                     let found = try await uploader.verify(asset: asset, known: known)
                     // not in the chest: remember that, never offer it for removal
-                    self.ledger[asset.localIdentifier] = LedgerEntry(h: found?.hashes ?? [], s: found?.bytes ?? 0, l: nil)
+                    self.ledger[asset.localIdentifier] = self.entry(asset, found?.hashes ?? [], found?.bytes ?? 0)
                 } catch {
                     if Task.isCancelled || error is CancellationError { break }
                 }
@@ -316,7 +322,9 @@ final class BackupEngine: ObservableObject {
                 }
             } catch {
                 if error is URLError { _ = await flush(); return offline }
-                // no usable preview on the server: store an empty set so it isn't fetched every run
+                // a missing preview gets an empty set (so it isn't fetched every run);
+                // anything else (server busy) is tried again next time
+                if let h = error as? SandukAPI.HTTPError, h.status != 404 { passDone += 1; continue }
             }
             let d = description ?? Labeler.Description(labels: item.video ? ["video"] : [], text: "")
             let iv = SandukCrypto.randomIV()
@@ -336,13 +344,27 @@ final class BackupEngine: ObservableObject {
         backgroundQueued = BackgroundUploads.shared.count
         if ok {
             doneIDs.insert(assetID)
-            if !hashes.isEmpty { ledger[assetID] = LedgerEntry(h: hashes, s: bytes, l: nil) }
+            if !hashes.isEmpty {
+                let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil).firstObject
+                ledger[assetID] = entry(asset, hashes, bytes)
+            }
             uploadedBytes += bytes
-            UserDefaults.standard.set(NSNumber(value: uploadedBytes), forKey: "uploadedBytes")
             finishedInBackground += 1
-            saveDone()
         }
-        if backgroundQueued == 0 || finishedInBackground % 5 == 0 { Self.announceChestChanged() }
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { BackupEngine.shared.flushBackgroundResults() }
+    }
+
+    private var flushScheduled = false
+
+    /// Write what finished in the background once, refresh counts once.
+    func flushBackgroundResults() {
+        flushScheduled = false
+        backgroundQueued = BackgroundUploads.shared.count
+        UserDefaults.standard.set(NSNumber(value: uploadedBytes), forKey: "uploadedBytes")
+        saveDone()
+        Self.announceChestChanged()
         if Self.photosAllowed { refreshCounts() }
         if backgroundQueued == 0 {
             if finishedInBackground > 0, UIApplication.shared.applicationState != .active {
@@ -396,6 +418,8 @@ final class BackupEngine: ObservableObject {
         for a in fetchAll() where doneIDs.contains(a.localIdentifier) {
             guard let e = ledger[a.localIdentifier] else { unchecked += 1; continue }
             guard !e.h.isEmpty, e.h.allSatisfy(inChest.contains) else { continue }
+            // edited after it was backed up: the edit isn't in the chest
+            if let m = e.m, let md = a.modificationDate, md.timeIntervalSince1970 > m + 1 { continue }
             if keepFavorites && a.isFavorite { continue }
             if let cutoff, let d = a.creationDate, d > cutoff { continue }
             out.append(a)
@@ -454,8 +478,12 @@ final class BackupEngine: ObservableObject {
         passDone = 0
         passTotal = 0
         // a little extra time if the app is closed mid-upload
-        let bgID = UIApplication.shared.beginBackgroundTask(withName: "sanduk-backup") {
-            Task { @MainActor in BackupEngine.shared.cancel() }
+        let bg = BackgroundTime()
+        bg.id = UIApplication.shared.beginBackgroundTask(withName: "sanduk-backup") {
+            // iOS wants the time back now (this runs on the main thread): stop work
+            // and end the task right away, or iOS terminates the app
+            MainActor.assumeIsolated { BackupEngine.shared.cancel() }
+            bg.end()
         }
 
         var ok = 0, skipped = 0, failed = 0, queuedNow = 0
@@ -498,7 +526,7 @@ final class BackupEngine: ObservableObject {
                         continue
                     }
                     doneIDs.insert(asset.localIdentifier)
-                    if !hashes.isEmpty { ledger[asset.localIdentifier] = LedgerEntry(h: hashes, s: bytes, l: nil) }
+                    if !hashes.isEmpty { ledger[asset.localIdentifier] = entry(asset, hashes, bytes) }
                     doneCount += 1
                     if outcome == .uploaded {
                         ok += 1
@@ -554,7 +582,7 @@ final class BackupEngine: ObservableObject {
             notify(ok == 1 ? "1 new item backed up to your chest."
                            : "\(ok) new items backed up to your chest.")
         }
-        UIApplication.shared.endBackgroundTask(bgID)
+        bg.end()
     }
 }
 
@@ -562,5 +590,17 @@ final class BackupEngine: ObservableObject {
 private final class LibraryWatcher: NSObject, PHPhotoLibraryChangeObserver {
     func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor in BackupEngine.shared.libraryChanged() }
+    }
+}
+
+/// The extra time iOS gives after you leave the app; ended exactly once.
+final class BackgroundTime: @unchecked Sendable {
+    private let lock = NSLock()
+    var id = UIBackgroundTaskIdentifier.invalid
+    func end() {
+        lock.lock(); defer { lock.unlock() }
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
     }
 }

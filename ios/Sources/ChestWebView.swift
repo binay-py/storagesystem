@@ -143,8 +143,8 @@ struct ChestWebView: UIViewRepresentable {
 
         private func present(_ alert: UIAlertController, from view: UIView, orElse fallback: @escaping () -> Void) {
             var top = view.window?.rootViewController
-            while let next = top?.presentedViewController { top = next }
-            guard let top else { fallback(); return }
+            while let next = top?.presentedViewController, !next.isBeingDismissed { top = next }
+            guard let top, !top.isBeingDismissed, top.presentedViewController == nil else { fallback(); return }
             top.present(alert, animated: true)
         }
 
